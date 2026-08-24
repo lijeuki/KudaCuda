@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/d19f7271-6c3f-4115-9075-e66c4978ab94" alt="KudaCuda Logo" width="220" />
+</p>
+
 # KudaCuda
 
 KudaCuda is a CUDA-first sidecar for direct PyTorch device-pointer dispatch. Its serving boundary is intentionally small:
@@ -32,7 +36,7 @@ The complete parity map and implementation checklist are recorded in [architectu
 
 ## Build
 
-Requirements: CUDA Toolkit with `nvcc`, CMake 3.24 or newer, and a visible NVIDIA GPU for the runtime smoke test. The toolkit and display driver must be compatible; CUDA 13.x requires a driver in the 580+ family. This laptop is currently running driver 610.88 with CUDA UMD 13.3.
+Requirements: CUDA Toolkit with `nvcc`, CMake 3.24 or newer, and a visible NVIDIA GPU for the runtime smoke test. The toolkit and display driver must be compatible; CUDA 13.x requires a driver in the 580+ family. This test is conducted by running driver 610.88 with CUDA UMD 13.3.
 
 On Windows PowerShell:
 
@@ -140,3 +144,6 @@ python tools/profiling/profile_command.py `
 ```
 
 The tools emit `skipped` evidence when PyTorch, a GPU, or Nsight is unavailable. Planned families remain framework fallbacks; see `results/kernel-status.json` before enabling a tactic.
+
+## Shoutout
+Thank you for netra runtime to make this project approachable https://github.com/NetraRuntime/netra-kernel/tree/main
