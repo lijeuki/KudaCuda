@@ -108,3 +108,6 @@ python tools/profiling/profile_command.py `
 ```
 
 The tools emit `skipped` evidence when PyTorch, a GPU, or Nsight is unavailable. Planned families remain framework fallbacks; see `results/kernel-status.json` before enabling a tactic.
+
+## Shotout
+Thank you for netra runtime to make this project approachable https://github.com/NetraRuntime/netra-kernel/tree/main
