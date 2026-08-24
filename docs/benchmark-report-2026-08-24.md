@@ -19,25 +19,41 @@ Both published executables pass:
 
 ## Transformers model results
 
-| Model / precision | Peak VRAM | TTFT | ITL | Throughput | Native attention |
-|---|---:|---:|---:|---:|---|
-| Gemma 2 2B, 4-bit | 2,263.8 MiB | 113.2 ms | 88.7 ms | 11.08 tok/s | Not dispatched |
-| Qwen2.5 3B, 4-bit | 2,109.7 MiB | 260.0 ms | 200.6 ms | 4.90 tok/s | Not dispatched |
+The table uses the baseline and sidecar halves of the same DLL-enabled process, keeping model loading and prompt conditions paired:
+
+| Model / precision | Mode | Peak VRAM | TTFT | ITL | Throughput | Native attention |
+|---|---|---:|---:|---:|---:|---|
+| Gemma 2 2B, 4-bit | Without sidecar | 2,263.8 MiB | 87.70 ms | 67.86 ms | 14.47 tok/s | Not dispatched |
+| Gemma 2 2B, 4-bit | DLL-loaded sidecar | 2,263.8 MiB | 82.73 ms | 67.77 ms | 14.55 tok/s | `fallback-only` |
+| Qwen2.5 3B, 4-bit | Without sidecar | 2,109.7 MiB | 252.19 ms | 223.97 ms | 4.43 tok/s | Not dispatched |
+| Qwen2.5 3B, 4-bit | DLL-loaded sidecar | 2,109.7 MiB | 209.75 ms | 221.10 ms | 4.54 tok/s | `fallback-only` |
 
 Qwen2.5-3B is larger than Gemma 2B and fits the 4 GiB card at this short benchmark context. The model snapshot was stored on `D:\AI\Models\HuggingFace` to keep the system drive free. Its exact baseline and sidecar evidence are:
 
-- [Qwen2.5-3B baseline](../results/qwen25-3b-sm86-4bit.json)
-- [Qwen2.5-3B DLL-loaded sidecar](../results/qwen25-3b-sm86-sidecar.json)
-- [Gemma 2B baseline](../results/gemma-sm86-4bit.json)
-- [Gemma 2B final sidecar](../results/gemma-sm86-sidecar-final.json)
+- [Qwen2.5-3B paired run](../results/qwen25-3b-sm86-sidecar-final-rerun.json)
+- [Qwen2.5-3B standalone baseline](../results/qwen25-3b-sm86-baseline-final.json)
+- [Gemma 2B paired run](../results/gemma-sm86-sidecar-final-rerun.json)
+- [Gemma 2B standalone baseline](../results/gemma-sm86-baseline-final.json)
 
-The Qwen sidecar run produced exact token and text parity. It used the native handle successfully but reported `fallback-only` and `native_attention_dispatcher: false`. The observed timing difference is therefore framework/run variation, not a KudaCuda attention speedup.
+Both sidecar runs produced exact token and text parity. They loaded the native handle successfully but reported `fallback-only`, `native_attention_dispatcher: false`, and `tactic_status: planned`. The observed timing differences are therefore framework/run variation, not KudaCuda attention speedups.
+
+## Full verification matrix
+
+- Python contract/tooling suite: 20/20 passed.
+- Python compilation: passed for all tracked Python files.
+- Native vector-add smoke: passed with a caller-owned non-default stream and CUDA Graph replay.
+- Native RMSNorm smoke: passed against an independent FP64 reference.
+- PyTorch RMSNorm harness: validated with maximum absolute error `5.004e-7`.
+- PyTorch vector-add harness: exact output match; 0.0722 ms average GPU event time over 100 repetitions.
+- Nsight Systems: validated; report generated at [nsys-sm86-vector-final.nsys-rep](../results/nsys-sm86-vector-final.nsys-rep).
+- Nsight Compute: blocked by Windows GPU performance-counter permission `ERR_NVGPUCTRPERM`.
+- `sm_89` compilation: blocked because `cl.exe` is not on `PATH` and the configured CMake launcher points to a missing WinGet package executable. See [sm89 build evidence](../results/sm89-build-final.json).
 
 ## Existing Ollama model
 
 `nemotron-3.5-lightning:latest` was tested through Ollama. GPU startup failed because the runner could not allocate a 24.9 GiB CUDA-host model buffer. A CPU-only API run completed with 16 tokens at approximately 2.84 tok/s and 73.63 seconds total. See [Nemotron evidence](../results/nemotron-ollama-cpu.json).
 
-This is not a KudaCuda result: Ollama's `llama-server` runner is separate from the Python/Transformers sidecar, and no Nemotron attention/DeltaNet dispatcher is implemented.
+This is not a KudaCuda result: Ollama's `llama-server` runner is separate from the Python/Transformers sidecar, and no Nemotron attention/DeltaNet dispatcher is implemented. A fresh 180-second CPU recheck timed out and was unloaded; see [recheck evidence](../results/nemotron-ollama-recheck.json).
 
 ## Interpretation and next work
 

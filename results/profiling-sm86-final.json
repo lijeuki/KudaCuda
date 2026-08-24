@@ -1,0 +1,15 @@
+{
+  "target_arch": "sm_86",
+  "gpu": "NVIDIA GeForce RTX 3050 Laptop GPU",
+  "nsys": {
+    "status": "validated",
+    "report": "nsys-sm86-vector-final.nsys-rep",
+    "command": "artifacts/sm86/kudacuda_vector_add_smoke.exe",
+    "notes": "CPU context-switch and sampling traces were disabled because the process lacked administrator privileges. CUDA collection completed."
+  },
+  "ncu": {
+    "status": "blocked",
+    "reason": "ERR_NVGPUCTRPERM: the user does not have permission to access NVIDIA GPU performance counters",
+    "command": "artifacts/sm86/kudacuda_rmsnorm_smoke.exe"
+  }
+}

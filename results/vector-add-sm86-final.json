@@ -1,0 +1,27 @@
+{
+  "count": 1048576,
+  "gpu_ms_average": 0.0721999979019165,
+  "host_ms_p50": 0.012299977242946625,
+  "metrics": {
+    "actual_count": 1048576,
+    "atol": 1e-05,
+    "count": 1048576,
+    "exact": true,
+    "expected_count": 1048576,
+    "inf_mismatch": 0,
+    "max_abs_error": 0.0,
+    "max_rel_error": 0.0,
+    "mismatches": 0,
+    "nan_actual": 0,
+    "nan_expected": 0,
+    "passed": true,
+    "rms_error": 0.0,
+    "rtol": 1e-05,
+    "shape_match": true
+  },
+  "reference": "torch.float32 addition",
+  "repetitions": 100,
+  "status": "validated",
+  "target_arch": "sm_86",
+  "warmup": 20
+}

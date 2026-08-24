@@ -1,0 +1,9 @@
+{
+  "target_arch": "sm_89",
+  "status": "blocked",
+  "nvcc": "13.3.73",
+  "reason": "nvcc fatal: Cannot find compiler cl.exe in PATH",
+  "host_compiler": "MSVC cl.exe",
+  "cmake": "The configured CMake launcher points to a missing WinGet package executable",
+  "note": "The sm_89 source and manifest are present; a Windows host compiler and working CMake installation are required to produce the L40S artifact."
+}

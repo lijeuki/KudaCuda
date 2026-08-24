@@ -1,0 +1,28 @@
+{
+  "dtype": "float32",
+  "metrics": {
+    "actual_count": 3591,
+    "atol": 5e-05,
+    "count": 3591,
+    "exact": false,
+    "expected_count": 3591,
+    "inf_mismatch": 0,
+    "max_abs_error": 5.00399544911545e-07,
+    "max_rel_error": 1.6434436266731428e-07,
+    "mismatches": 0,
+    "nan_actual": 0,
+    "nan_expected": 0,
+    "passed": true,
+    "rms_error": 5.559246669764114e-08,
+    "rtol": 5e-05,
+    "shape_match": true
+  },
+  "reference": "KudaCuda.harness.reference.rmsnorm_reference",
+  "seed": 17,
+  "shape": [
+    7,
+    513
+  ],
+  "status": "validated",
+  "target_arch": "sm_86"
+}

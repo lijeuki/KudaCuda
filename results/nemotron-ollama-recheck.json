@@ -1,0 +1,13 @@
+{
+  "model": "nemotron-3.5-lightning:latest",
+  "runtime": "Ollama",
+  "requested_mode": "CPU fallback recheck with OLLAMA_NUM_GPU=0",
+  "status": "timeout",
+  "timeout_seconds": 180,
+  "kudacuda": {
+    "status": "not_attached",
+    "reason": "Ollama's llama-server runner is separate from the KudaCuda Python/C-ABI Transformers sidecar."
+  },
+  "previous_completed_evidence": "nemotron-ollama-cpu.json",
+  "note": "The test model was unloaded after the timeout. The earlier completed CPU run remains the accepted Nemotron evidence."
+}
