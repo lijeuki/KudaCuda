@@ -32,7 +32,7 @@ The complete parity map and implementation checklist are recorded in [architectu
 
 ## Build
 
-Requirements: CUDA Toolkit with `nvcc`, CMake 3.24 or newer, and a visible NVIDIA GPU for the runtime smoke test. The toolkit and display driver must be compatible; CUDA 13.x requires a driver in the 580+ family. This laptop is currently running driver 610.88 with CUDA UMD 13.3.
+Requirements: CUDA Toolkit with `nvcc`, CMake 3.24 or newer, and a visible NVIDIA GPU for the runtime smoke test. The toolkit and display driver must be compatible; CUDA 13.x requires a driver in the 580+ family. This test is conducted by running driver 610.88 with CUDA UMD 13.3.
 
 On Windows PowerShell:
 
