@@ -21,7 +21,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from KudaCuda.harness.compare import write_json_evidence
-from KudaCuda.python.kudacuda_sidecar import KudaCudaBridge, patch_llama_attention
+from KudaCuda.python.kudacuda_sidecar import (
+    KudaCudaBridge,
+    patch_llama_attention,
+    patch_qwen2_attention,
+)
 
 
 def summarize_generation(
@@ -197,6 +201,32 @@ def _dtype(torch: Any, name: str) -> Any:
     return {"float16": torch.float16, "bfloat16": torch.bfloat16}[name]
 
 
+def _install_attention_patch(model: Any, bridge: KudaCudaBridge) -> tuple[Callable[[], None], str]:
+    """Patch the model's concrete attention class with its exact tactic contract."""
+
+    attention_cls = type(model.model.layers[0].self_attn)
+    model_type = str(getattr(getattr(model, "config", None), "model_type", "")).lower()
+    if model_type == "qwen2" or attention_cls.__name__ == "Qwen2Attention":
+        arch = str(getattr(bridge, "manifest", {}).get("target_arch", "sm_86")).replace("sm_", "sm")
+        tactic_name = f"qwen2_gqa_decode_{arch}_fp16"
+        return (
+            patch_qwen2_attention(
+                bridge,
+                attention_cls=attention_cls,
+                tactic_name=tactic_name,
+            ),
+            tactic_name,
+        )
+    return (
+        patch_llama_attention(
+            bridge,
+            attention_cls=attention_cls,
+            tactic_name="gqa8_attn",
+        ),
+        "gqa8_attn",
+    )
+
+
 def _base_payload(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "status": "blocked",
@@ -314,30 +344,35 @@ def main(argv: list[str] | None = None) -> int:
         unpatch = None
         try:
             bridge = KudaCudaBridge(manifest=args.manifest, lib_path=args.library)
-            attention_cls = type(model.model.layers[0].self_attn)
-            unpatch = patch_llama_attention(
-                bridge,
-                attention_cls=attention_cls,
-                tactic_name="gqa8_attn",
-            )
-            dispatcher = callable(getattr(bridge, "dispatch_attention", None))
-            tactic_status = bridge.tactic_status("gqa8_attn")
-            sidecar_status = "completed" if dispatcher and tactic_status == "implemented" else "fallback-only"
+            unpatch, tactic_name = _install_attention_patch(model, bridge)
+            dispatcher = bool(getattr(bridge, "native_attention_dispatcher", False))
+            tactic_status = bridge.tactic_status(tactic_name)
             allocated_after_load = float(torch.cuda.memory_allocated(device) / (1024**2)) if device.type == "cuda" else None
+            generation = run_generation(
+                torch=torch,
+                model=model,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                tokenizer=tokenizer,
+                max_new_tokens=args.max_new_tokens,
+                device=device,
+            )
+            native_dispatches = int(getattr(bridge, "native_attention_dispatches", 0))
+            dispatch_reason = getattr(bridge, "last_qwen2_dispatch_reason", None)
+            sidecar_status = (
+                "completed"
+                if dispatcher and tactic_status == "implemented" and native_dispatches > 0
+                else "fallback-only"
+            )
             payload["sidecar"] = {
                 "status": sidecar_status,
+                "tactic_name": tactic_name,
                 "tactic_status": tactic_status,
                 "native_attention_dispatcher": dispatcher,
+                "native_attention_dispatches": native_dispatches,
+                "last_qwen2_dispatch_reason": dispatch_reason,
                 "allocated_after_load_mib": allocated_after_load,
-                **run_generation(
-                    torch=torch,
-                    model=model,
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    tokenizer=tokenizer,
-                    max_new_tokens=args.max_new_tokens,
-                    device=device,
-                ),
+                **generation,
             }
         except Exception as error:
             payload["sidecar"] = {

@@ -40,6 +40,10 @@ Open a Visual Studio Developer Command Prompt, or load the developer environment
 ```powershell
 $env:CUDACXX = 'C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.3/bin/nvcc.exe'
 
+# If cl.exe is not already on PATH, start a developer shell and run the
+# remaining commands in that new window:
+cmd.exe /k call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+
 cmake -S . -B build-sm86 -G Ninja `
   -DCMAKE_CUDA_ARCHITECTURES=86 `
   -DCMAKE_CUDA_COMPILER="$env:CUDACXX" `
@@ -49,6 +53,7 @@ cmake --build build-sm86
 
 ./build-sm86/kudacuda_vector_add_smoke.exe
 ./build-sm86/kudacuda_rmsnorm_smoke.exe
+./build-sm86/kudacuda_qwen2_gqa_smoke.exe
 ```
 
 For a normal CUDA 13.x Windows installation, the NVIDIA display driver provides `nvcuda.dll`. If the Toolkit does not ship `nvcuda.lib`, CMake generates the small import library from `runtime/nvcuda.def`; it does not copy or redistribute the driver DLL.
@@ -84,7 +89,20 @@ python tools/benchmark/benchmark_gemma.py \
   --output results/gemma-sm86-sidecar-final.json
 ```
 
-The script is model-generic despite its historical filename. Use a different Hugging Face model ID with `--model`. A result of `fallback-only` is expected until that model's native attention tactic exists; it is not a speedup claim.
+The script is model-generic despite its historical filename. Qwen2.5-3B uses the active `qwen2_gqa_decode_sm86_fp16` tactic when the exact decode contract matches; Gemma and unsupported profiles remain `fallback-only`. A DLL load without native launch counts is never a speedup claim.
+
+The direct Qwen2 validation and microbenchmark are:
+
+```powershell
+python tools/correctness/run_qwen2_gqa_check.py `
+  --manifest manifests/rtx3050-sm86.json `
+  --library artifacts/sm86/kudacuda.dll `
+  --output results/qwen2-gqa-sm86-native.json
+python tools/benchmark/benchmark_qwen2_gqa.py `
+  --manifest manifests/rtx3050-sm86.json `
+  --library artifacts/sm86/kudacuda.dll `
+  --output results/qwen2-gqa-sm86-microbenchmark.json
+```
 
 ## Model sizing on a 4 GiB RTX 3050
 

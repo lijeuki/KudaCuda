@@ -1,6 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 PYTHON_ROOT = Path(__file__).parents[1] / "python"
 sys.path.insert(0, str(PYTHON_ROOT))
@@ -8,9 +9,12 @@ sys.path.insert(0, str(PYTHON_ROOT))
 from kudacuda_sidecar import (  # noqa: E402
     KudaCudaBridge,
     NativeCudaError,
+    Qwen2GqaContract,
     TensorContract,
     load_manifest,
+    patch_qwen2_attention,
     patch_llama_attention,
+    _qwen2_attention_dimensions,
     select_library_name,
 )
 from KudaCuda.harness.reference import rmsnorm_reference  # noqa: E402
@@ -27,15 +31,17 @@ class FakeNativeFunction:
 
 
 class FakeNative:
-    def __init__(self, vector_status=0, rmsnorm_status=0):
+    def __init__(self, vector_status=0, rmsnorm_status=0, qwen_status=0):
         self.calls = []
         self.vector_status = vector_status
         self.rmsnorm_status = rmsnorm_status
+        self.qwen_status = qwen_status
         self.kudacuda_create = FakeNativeFunction(lambda device: 101)
         self.kudacuda_freeze = FakeNativeFunction(lambda handle: 0)
         self.kudacuda_can_dispatch = FakeNativeFunction(lambda handle, tactic, batch, seq: 1)
         self.kudacuda_vector_add = FakeNativeFunction(self._vector_add)
         self.kudacuda_rmsnorm = FakeNativeFunction(self._rmsnorm)
+        self.kudacuda_qwen2_gqa_decode = FakeNativeFunction(self._qwen2_gqa_decode)
         self.kudacuda_begin_capture = FakeNativeFunction(lambda handle, stream: 0)
         self.kudacuda_end_capture = FakeNativeFunction(lambda handle, stream: 0)
         self.kudacuda_replay_graph = FakeNativeFunction(lambda handle, stream: 0)
@@ -49,6 +55,42 @@ class FakeNative:
     def _rmsnorm(self, handle, input_ptr, weight_ptr, output_ptr, rows, hidden, epsilon, stream):
         self.calls.append(("rmsnorm", handle, input_ptr, weight_ptr, output_ptr, rows, hidden, epsilon, stream))
         return self.rmsnorm_status
+
+    def _qwen2_gqa_decode(
+        self,
+        handle,
+        query_ptr,
+        key_ptr,
+        value_ptr,
+        output_ptr,
+        batch,
+        query_len,
+        kv_len,
+        query_heads,
+        kv_heads,
+        head_dim,
+        scale,
+        stream,
+    ):
+        self.calls.append(
+            (
+                "qwen2_gqa_decode",
+                handle,
+                query_ptr,
+                key_ptr,
+                value_ptr,
+                output_ptr,
+                batch,
+                query_len,
+                kv_len,
+                query_heads,
+                kv_heads,
+                head_dim,
+                scale,
+                stream,
+            )
+        )
+        return self.qwen_status
 
 
 class FakeTensor:
@@ -112,7 +154,87 @@ def make_bridge(native=None, manifest=None):
     )
 
 
+def qwen_manifest():
+    return {
+        "project": "KudaCuda",
+        "target_arch": "sm_86",
+        "implemented_tactics": ["qwen2_gqa_decode_sm86_fp16"],
+        "planned_tactics": [],
+        "contracts": {
+            "qwen2_gqa_decode_sm86_fp16": {
+                "dtype": "float16",
+                "layout": "contiguous",
+                "batch_size": 1,
+                "query_len": 1,
+                "kv_len_min": 1,
+                "kv_len_max": 512,
+                "query_heads": 16,
+                "kv_heads": 2,
+                "head_dim": 128,
+            }
+        },
+    }
+
+
 class ContractTests(unittest.TestCase):
+    def test_qwen2_attention_dimensions_read_current_transformers_config_layout(self):
+        module = SimpleNamespace(
+            config=SimpleNamespace(num_attention_heads=16, num_key_value_heads=2),
+            head_dim=128,
+        )
+
+        self.assertEqual(_qwen2_attention_dimensions(module), (16, 2, 128))
+
+    def test_qwen2_contract_requires_decode_profile_and_fp16_contiguous_tensors(self):
+        contract = Qwen2GqaContract.from_mapping(
+            {
+                "dtype": "float16",
+                "layout": "contiguous",
+                "batch_size": 1,
+                "query_len": 1,
+                "kv_len_min": 1,
+                "kv_len_max": 512,
+                "query_heads": 16,
+                "kv_heads": 2,
+                "head_dim": 128,
+            }
+        )
+
+        self.assertTrue(contract.matches(1, 1, 128))
+        self.assertFalse(contract.matches(2, 1, 128))
+        self.assertFalse(contract.matches(1, 2, 128))
+        self.assertFalse(contract.matches(1, 513, 128))
+
+    def test_qwen2_bridge_passes_pointers_dimensions_and_stream(self):
+        native = FakeNative()
+        bridge = make_bridge(native=native, manifest=qwen_manifest())
+        bridge.dispatch_qwen2_gqa_decode(
+            FakeTensor(dtype="float16", shape=(1, 16, 1, 128), pointer=11),
+            FakeTensor(dtype="float16", shape=(1, 2, 128, 128), pointer=22),
+            FakeTensor(dtype="float16", shape=(1, 2, 128, 128), pointer=33),
+            FakeTensor(dtype="float16", shape=(1, 16, 1, 128), pointer=44),
+            kv_len=128,
+            stream_ptr=77,
+        )
+
+        call = native.calls[-1]
+        self.assertEqual(call[0], "qwen2_gqa_decode")
+        self.assertEqual(call[1:6], (101, 11, 22, 33, 44))
+        self.assertEqual(call[6:12], (1, 1, 128, 16, 2, 128))
+        self.assertAlmostEqual(call[12], 1.0 / (128.0 ** 0.5))
+        self.assertEqual(call[13], 77)
+
+    def test_qwen2_bridge_surfaces_native_error(self):
+        bridge = make_bridge(native=FakeNative(qwen_status=9), manifest=qwen_manifest())
+        tensors = [
+            FakeTensor(dtype="float16", shape=(1, 16, 1, 128), pointer=11),
+            FakeTensor(dtype="float16", shape=(1, 2, 128, 128), pointer=22),
+            FakeTensor(dtype="float16", shape=(1, 2, 128, 128), pointer=33),
+            FakeTensor(dtype="float16", shape=(1, 16, 1, 128), pointer=44),
+        ]
+
+        with self.assertRaisesRegex(NativeCudaError, "fake native error"):
+            bridge.dispatch_qwen2_gqa_decode(*tensors, kv_len=128, stream_ptr=77)
     def test_tensor_contract_requires_exact_batch_and_sequence_when_declared(self):
         contract = TensorContract.from_mapping(
             {
@@ -208,7 +330,10 @@ class ContractTests(unittest.TestCase):
         manifest = load_manifest(manifest_path)
 
         self.assertEqual(manifest["target_arch"], "sm_86")
-        self.assertEqual(manifest["implemented_tactics"], ["vector_add", "rmsnorm"])
+        self.assertEqual(
+            manifest["implemented_tactics"],
+            ["vector_add", "rmsnorm", "qwen2_gqa_decode_sm86_fp16"],
+        )
         self.assertEqual(select_library_name("win32"), "kudacuda.dll")
         self.assertEqual(select_library_name("linux"), "libkudacuda.so")
 
@@ -250,6 +375,16 @@ class AttentionPatchTests(unittest.TestCase):
         self.assertEqual(instance.forward(FakeTensor(shape=(1, 2, 8)))[0], "hot")
         self.assertEqual(len(bridge.calls), 1)
         unpatch()
+
+    def test_qwen2_attention_patch_falls_back_and_is_reversible(self):
+        original = FakeAttention.forward
+        bridge = FakeAttentionBridge(enabled=False)
+        unpatch = patch_qwen2_attention(bridge, attention_cls=FakeAttention)
+
+        instance = FakeAttention()
+        self.assertEqual(instance.forward(FakeTensor(shape=(1, 1, 2048)))[0], "fallback")
+        unpatch()
+        self.assertIs(FakeAttention.forward, original)
 
 
 if __name__ == "__main__":

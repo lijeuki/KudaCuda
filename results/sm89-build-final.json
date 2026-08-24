@@ -1,9 +1,10 @@
 {
   "target_arch": "sm_89",
-  "status": "blocked",
+  "status": "compiled",
   "nvcc": "13.3.73",
-  "reason": "nvcc fatal: Cannot find compiler cl.exe in PATH",
+  "build_directory": "build-sm89-qwen-ninja",
   "host_compiler": "MSVC cl.exe",
-  "cmake": "The configured CMake launcher points to a missing WinGet package executable",
-  "note": "The sm_89 source and manifest are present; a Windows host compiler and working CMake installation are required to produce the L40S artifact."
+  "cmake": "Visual Studio Build Tools bundled CMake 3.31 with Ninja",
+  "targets": ["kudacuda.dll", "kudacuda_vector_add_smoke.exe", "kudacuda_rmsnorm_smoke.exe", "kudacuda_qwen2_gqa_smoke.exe"],
+  "runtime_validation": "pending L40S hardware; RTX 3050 cannot execute sm_89 device code"
 }

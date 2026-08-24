@@ -1,6 +1,7 @@
 #include "kudacuda.h"
 
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 
 #include <cstdint>
 #include <cstring>
@@ -24,6 +25,21 @@ extern "C" cudaError_t kudacuda_launch_rmsnorm(
     int64_t rows,
     int64_t hidden,
     float epsilon,
+    cudaStream_t stream
+);
+
+extern "C" cudaError_t kudacuda_launch_qwen2_gqa_decode(
+    const __half* query,
+    const __half* key_cache,
+    const __half* value_cache,
+    __half* output,
+    int64_t batch_size,
+    int64_t query_len,
+    int64_t kv_len,
+    int64_t query_heads,
+    int64_t kv_heads,
+    int64_t head_dim,
+    float scale,
     cudaStream_t stream
 );
 
@@ -110,10 +126,16 @@ int kudacuda_can_dispatch(
     if (batch_size <= 0 || seq_len <= 0) {
         return 0;
     }
-    const bool supported =
-        std::strcmp(tactic_name, "vector_add") == 0 ||
-        std::strcmp(tactic_name, "rmsnorm") == 0;
-    return supported ? 1 : 0;
+    const bool qwen_tactic =
+        std::strcmp(tactic_name, "qwen2_gqa_decode_sm86_fp16") == 0 ||
+        std::strcmp(tactic_name, "qwen2_gqa_decode_sm89_fp16") == 0;
+    if (qwen_tactic) {
+        return batch_size == 1 && seq_len == 1 ? 1 : 0;
+    }
+    return std::strcmp(tactic_name, "vector_add") == 0 ||
+                   std::strcmp(tactic_name, "rmsnorm") == 0
+               ? 1
+               : 0;
 }
 
 int kudacuda_vector_add(
@@ -198,6 +220,65 @@ int kudacuda_rmsnorm(
     );
     if (status != cudaSuccess) {
         handle->set_cuda_error("rmsnorm_kernel", status);
+        return 1;
+    }
+    handle->last_error.clear();
+    return 0;
+}
+
+int kudacuda_qwen2_gqa_decode(
+    void* raw_handle,
+    uint64_t query,
+    uint64_t key_cache,
+    uint64_t value_cache,
+    uint64_t output,
+    int64_t batch_size,
+    int64_t query_len,
+    int64_t kv_len,
+    int64_t query_heads,
+    int64_t kv_heads,
+    int64_t head_dim,
+    float scale,
+    uint64_t stream
+) {
+    auto* handle = reinterpret_cast<kudacuda::Handle*>(raw_handle);
+    if (!kudacuda::is_valid_handle(handle)) {
+        return 1;
+    }
+    if (!handle->frozen) {
+        handle->set_error("kudacuda_qwen2_gqa_decode called before kudacuda_freeze");
+        return 1;
+    }
+    if (query == 0 || key_cache == 0 || value_cache == 0 || output == 0) {
+        handle->set_error("qwen2_gqa_decode requires non-null device pointers");
+        return 1;
+    }
+    if (batch_size != 1 || query_len != 1 || kv_len < 1 || kv_len > 512 ||
+        query_heads != 16 || kv_heads != 2 || head_dim != 128) {
+        handle->set_error("qwen2_gqa_decode requires batch=1, query_len=1, kv_len=1..512, q_heads=16, kv_heads=2, head_dim=128");
+        return 1;
+    }
+    if (!(scale > 0.0F)) {
+        handle->set_error("qwen2_gqa_decode scale must be positive");
+        return 1;
+    }
+
+    const auto status = kudacuda::kudacuda_launch_qwen2_gqa_decode(
+        reinterpret_cast<const __half*>(query),
+        reinterpret_cast<const __half*>(key_cache),
+        reinterpret_cast<const __half*>(value_cache),
+        reinterpret_cast<__half*>(output),
+        batch_size,
+        query_len,
+        kv_len,
+        query_heads,
+        kv_heads,
+        head_dim,
+        scale,
+        reinterpret_cast<cudaStream_t>(stream)
+    );
+    if (status != cudaSuccess) {
+        handle->set_cuda_error("qwen2_gqa_decode_kernel", status);
         return 1;
     }
     handle->last_error.clear();

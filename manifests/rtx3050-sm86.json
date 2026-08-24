@@ -4,7 +4,7 @@
   "device_name": "NVIDIA RTX 3050 Laptop GPU",
   "warp_size": 32,
   "shared_memory_kb": 100,
-  "implemented_tactics": ["vector_add", "rmsnorm"],
+  "implemented_tactics": ["vector_add", "rmsnorm", "qwen2_gqa_decode_sm86_fp16"],
   "planned_tactics": ["gqa8_attn", "kv_cache", "quantization", "moe", "routing", "sampling"],
   "precision_support": ["float32", "float16", "bfloat16", "tf32", "int8", "int4"],
   "contracts": {
@@ -19,6 +19,17 @@
       "layout": "contiguous",
       "rank": 2,
       "count_min": 1
+    },
+    "qwen2_gqa_decode_sm86_fp16": {
+      "dtype": "float16",
+      "layout": "contiguous",
+      "batch_size": 1,
+      "query_len": 1,
+      "kv_len_min": 1,
+      "kv_len_max": 512,
+      "query_heads": 16,
+      "kv_heads": 2,
+      "head_dim": 128
     }
   }
 }

@@ -47,6 +47,22 @@ KUDACUDA_API int kudacuda_rmsnorm(
     uint64_t stream
 );
 
+KUDACUDA_API int kudacuda_qwen2_gqa_decode(
+    void* handle,
+    uint64_t query,
+    uint64_t key_cache,
+    uint64_t value_cache,
+    uint64_t output,
+    int64_t batch_size,
+    int64_t query_len,
+    int64_t kv_len,
+    int64_t query_heads,
+    int64_t kv_heads,
+    int64_t head_dim,
+    float scale,
+    uint64_t stream
+);
+
 KUDACUDA_API int kudacuda_begin_capture(void* handle, uint64_t stream);
 
 KUDACUDA_API int kudacuda_end_capture(void* handle, uint64_t stream);

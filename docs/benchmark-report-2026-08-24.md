@@ -12,10 +12,11 @@
 
 ## Native smoke validation
 
-Both published executables pass:
+All three published smoke executables pass:
 
 - `kudacuda_vector_add_smoke.exe`: raw device pointers, caller-owned non-default stream, and CUDA graph replay passed on the RTX 3050.
 - `kudacuda_rmsnorm_smoke.exe`: output matched an independent FP64 reference within the declared tolerance.
+- `kudacuda_qwen2_gqa_smoke.exe`: decode GQA output matched an independent FP32 score/softmax/value reference.
 
 ## Transformers model results
 
@@ -25,29 +26,46 @@ The table uses the baseline and sidecar halves of the same DLL-enabled process, 
 |---|---|---:|---:|---:|---:|---|
 | Gemma 2 2B, 4-bit | Without sidecar | 2,263.8 MiB | 87.70 ms | 67.86 ms | 14.47 tok/s | Not dispatched |
 | Gemma 2 2B, 4-bit | DLL-loaded sidecar | 2,263.8 MiB | 82.73 ms | 67.77 ms | 14.55 tok/s | `fallback-only` |
-| Qwen2.5 3B, 4-bit | Without sidecar | 2,109.7 MiB | 252.19 ms | 223.97 ms | 4.43 tok/s | Not dispatched |
-| Qwen2.5 3B, 4-bit | DLL-loaded sidecar | 2,109.7 MiB | 209.75 ms | 221.10 ms | 4.54 tok/s | `fallback-only` |
+| Qwen2.5 3B, 4-bit | Without sidecar | 2,109.7 MiB | 207.28 ms | 196.52 ms | 5.071 tok/s | Not dispatched |
+| Qwen2.5 3B, 4-bit | Active native sidecar | 2,109.5 MiB | 217.61 ms | 159.66 ms | 6.125 tok/s | `completed`, 576 native launches |
 
 Qwen2.5-3B is larger than Gemma 2B and fits the 4 GiB card at this short benchmark context. The model snapshot was stored on `D:\AI\Models\HuggingFace` to keep the system drive free. Its exact baseline and sidecar evidence are:
 
-- [Qwen2.5-3B paired run](../results/qwen25-3b-sm86-sidecar-final-rerun.json)
+- [Qwen2.5-3B active native 4-bit paired run](../results/qwen25-3b-sm86-native-4bit-sidecar-final.json)
+- [Qwen2.5-3B native attention correctness](../results/qwen2-gqa-sm86-native-optimized-final.json)
+- [Qwen2.5-3B native attention microbenchmark](../results/qwen2-gqa-sm86-microbenchmark-optimized-final.json)
 - [Qwen2.5-3B standalone baseline](../results/qwen25-3b-sm86-baseline-final.json)
 - [Gemma 2B paired run](../results/gemma-sm86-sidecar-final-rerun.json)
 - [Gemma 2B standalone baseline](../results/gemma-sm86-baseline-final.json)
 
-Both sidecar runs produced exact token and text parity. They loaded the native handle successfully but reported `fallback-only`, `native_attention_dispatcher: false`, and `tactic_status: planned`. The observed timing differences are therefore framework/run variation, not KudaCuda attention speedups.
+The Qwen2 active sidecar run produced exact token and text parity, reported `native_attention_dispatcher: true`, `tactic_status: implemented`, and executed 576 native attention launches. Its decode ITL improved by approximately 18.7% and throughput by approximately 20.8% in this paired run; TTFT increased slightly because the first slice intentionally covers decode attention only and leaves prefill in Transformers. Gemma remains fallback-only because its GQA4 tactic is not implemented.
+
+### Fresh paired retry — 2026-08-25
+
+A new Qwen2.5-3B 4-bit run used the same model snapshot, prompt, token limit, and RTX 3050. The sidecar-enabled process measured its own baseline and active runs under identical conditions:
+
+| Mode | TTFT | ITL | Throughput | Peak VRAM | Output parity |
+|---|---:|---:|---:|---:|---|
+| Without KudaCuda | 74.97 ms | 70.95 ms | 14.045 tok/s | 2,109.7 MiB | — |
+| Active KudaCuda sidecar | 68.01 ms | 59.34 ms | 16.699 tok/s | 2,109.5 MiB | Exact; 576 native launches |
+
+This retry improved throughput by 18.9%, reduced decode ITL by 16.4%, and reduced total generation time by 15.9%. The sidecar reported `native_attention_dispatcher: true`, `qwen2_gqa_decode_sm86_fp16`, and `last_qwen2_dispatch_reason: native`. Evidence: [fresh paired retry](../results/qwen25-3b-sm86-sidecar-retry.json). A separate baseline-only process measured 13.363 tok/s, confirming that the within-process baseline is the appropriate paired comparison.
 
 ## Full verification matrix
 
-- Python contract/tooling suite: 20/20 passed.
+- Python contract/tooling suite: 25/25 passed.
 - Python compilation: passed for all tracked Python files.
 - Native vector-add smoke: passed with a caller-owned non-default stream and CUDA Graph replay.
 - Native RMSNorm smoke: passed against an independent FP64 reference.
+- Native Qwen2 GQA smoke: passed against an independent FP32 reference.
+- Qwen2 native correctness harness: passed for KV lengths 1, 7, 128, and 512; maximum absolute error `1.22e-4`.
+- Qwen2 native microbenchmark: 6.25–10.08× GPU-event speedup versus PyTorch eager attention across the tested KV lengths.
+- Nsight Systems: the `qwen2_gqa_decode_kernel` appears in the GPU kernel summary; see [native Qwen2 trace](../results/nsys-qwen2-sm86-native.nsys-rep).
 - PyTorch RMSNorm harness: validated with maximum absolute error `5.004e-7`.
 - PyTorch vector-add harness: exact output match; 0.0722 ms average GPU event time over 100 repetitions.
 - Nsight Systems: validated; report generated at [nsys-sm86-vector-final.nsys-rep](../results/nsys-sm86-vector-final.nsys-rep).
 - Nsight Compute: blocked by Windows GPU performance-counter permission `ERR_NVGPUCTRPERM`.
-- `sm_89` compilation: blocked because `cl.exe` is not on `PATH` and the configured CMake launcher points to a missing WinGet package executable. See [sm89 build evidence](../results/sm89-build-final.json).
+- `sm_89` compilation: completed with the installed MSVC Build Tools, CUDA 13.3, and Visual Studio CMake/Ninja; runtime validation remains pending on an L40S. See [sm89 build evidence](../results/sm89-build-final.json).
 
 ## Existing Ollama model
 
@@ -59,8 +77,8 @@ This is not a KudaCuda result: Ollama's `llama-server` runner is separate from t
 
 The native ABI, stream forwarding, graph lifecycle, RMSNorm correctness, and GPU build are validated. The principal performance work remains model-critical:
 
-1. Add a generic attention ABI with model-specific contracts.
-2. Implement Gemma GQA4 (`Q=8`, `KV=4`, `head_dim=256`) and Qwen2 GQA (`Q=16`, `KV=2`, `head_dim=128`) separately.
-3. Add RoPE, causal/sliding-window masks, and KV-cache updates.
-4. Add quantized matmul and fused MLP paths before claiming end-to-end speedups.
-5. Repeat the benchmark only after native dispatch, output parity, and no-fallback evidence pass.
+1. Repeat the paired Qwen2 4-bit benchmark to establish variance bands and capture kernel-level timing inside the full model.
+2. Implement Gemma GQA4 (`Q=8`, `KV=4`, `head_dim=256`) with its sliding-window contract.
+3. Add prefill, BF16, paged KV cache, and batching profiles.
+4. Add quantized matmul and fused MLP paths, which dominate total model time beyond attention.
+5. Build and validate the same Qwen2 tactic on `sm_89`/L40S before production promotion.
