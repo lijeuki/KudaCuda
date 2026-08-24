@@ -1,0 +1,11 @@
+{
+  "dtype": "float16",
+  "max_new_tokens": 32,
+  "model_id": "google/gemma-2-2b-it",
+  "prompt": "Explain the difference between a CPU and a GPU in three clear bullet points.",
+  "reason": "Required dependency unavailable: No module named 'torch'",
+  "sidecar": {
+    "status": "not-run"
+  },
+  "status": "blocked"
+}

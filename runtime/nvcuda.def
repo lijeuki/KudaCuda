@@ -1,0 +1,13 @@
+LIBRARY nvcuda.dll
+EXPORTS
+    cuCtxSetCurrent
+    cuDeviceGet
+    cuDevicePrimaryCtxRelease
+    cuDevicePrimaryCtxRelease_v2
+    cuDevicePrimaryCtxRetain
+    cuGetErrorName
+    cuGetErrorString
+    cuInit
+    cuModuleGetFunction
+    cuModuleLoad
+    cuModuleUnload

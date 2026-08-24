@@ -1,0 +1,53 @@
+{
+  "baseline": {
+    "allocated_after_load_mib": 2238.365234375,
+    "generated_tokens": 4,
+    "itl_ms": 75.98416900634766,
+    "peak_vram_mib": 2263.8173828125,
+    "status": "completed",
+    "text": "Explain the difference between a CPU and a GPU in three clear bullet points.\n\n* **CPU",
+    "token_ids": [
+      2,
+      74198,
+      573,
+      5830,
+      1865,
+      476,
+      22638,
+      578,
+      476,
+      37783,
+      575,
+      2149,
+      3110,
+      26353,
+      3782,
+      235265,
+      109,
+      235287,
+      5231,
+      28524
+    ],
+    "tokens_per_second": 12.610696997365933,
+    "total_ms": 317.19103240966797,
+    "ttft_ms": 89.238525390625,
+    "wall_total_ms": 319.6270999033004
+  },
+  "comparison": {
+    "reason": "Sidecar generation did not produce output",
+    "status": "skipped"
+  },
+  "device": "cuda",
+  "dtype": "float16",
+  "gpu": "NVIDIA GeForce RTX 3050 Laptop GPU",
+  "max_new_tokens": 4,
+  "measurement": "CUDA events for prefill/decode kernels; synchronized wall time recorded separately",
+  "model_id": "google/gemma-2-2b-it",
+  "prompt": "Explain the difference between a CPU and a GPU in three clear bullet points.",
+  "sidecar": {
+    "reason": "OSError: exception: access violation reading 0x0000000000000000",
+    "status": "failed"
+  },
+  "status": "completed",
+  "vram_capacity_mib": 4095.5
+}

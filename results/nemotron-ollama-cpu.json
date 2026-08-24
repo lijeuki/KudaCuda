@@ -1,0 +1,27 @@
+{
+  "project": "KudaCuda",
+  "model": "nemotron-3.5-lightning:latest",
+  "runtime": "Ollama 0.32.15",
+  "prompt": "Explain CUDA in exactly three short bullet points.",
+  "generation": {
+    "status": "completed",
+    "processor": "100% CPU",
+    "context": 4096,
+    "prompt_tokens": 27,
+    "generated_tokens": 16,
+    "total_ms": 73630.41,
+    "load_ms": 58918.41,
+    "prompt_eval_ms": 8893.7,
+    "decode_ms": 5630.63,
+    "decode_tokens_per_second": 2.8415,
+    "text_prefix": "*   **Parallel Computing Platform:** CUDA (Compute Unified Device Architecture) is"
+  },
+  "gpu_attempt": {
+    "status": "failed",
+    "reason": "Ollama could not allocate a 24918722304-byte CUDA_Host model buffer"
+  },
+  "kudacuda": {
+    "status": "not_attached",
+    "reason": "The Ollama llama-server runner is separate from the KudaCuda Python/C-ABI Transformers sidecar; no Nemotron attention dispatcher exists yet."
+  }
+}

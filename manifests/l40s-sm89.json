@@ -1,0 +1,24 @@
+{
+  "project": "KudaCuda",
+  "target_arch": "sm_89",
+  "device_name": "NVIDIA L40S",
+  "warp_size": 32,
+  "shared_memory_kb": 100,
+  "implemented_tactics": ["vector_add", "rmsnorm"],
+  "planned_tactics": ["gqa8_attn", "kv_cache", "quantization", "moe", "routing", "sampling"],
+  "precision_support": ["float32", "float16", "bfloat16", "tf32", "fp8", "int8", "int4"],
+  "contracts": {
+    "vector_add": {
+      "dtype": "float32",
+      "layout": "contiguous",
+      "rank": 1,
+      "count_min": 1
+    },
+    "rmsnorm": {
+      "dtype": "float32",
+      "layout": "contiguous",
+      "rank": 2,
+      "count_min": 1
+    }
+  }
+}

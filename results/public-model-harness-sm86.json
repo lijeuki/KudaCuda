@@ -1,0 +1,49 @@
+{
+  "baseline": {
+    "allocated_after_load_mib": 256.59130859375,
+    "generated_tokens": 1,
+    "itl_ms": null,
+    "peak_vram_mib": 266.5224609375,
+    "status": "completed",
+    "text": "Explain the difference between a CPU and a GPU in three clear bullet points.",
+    "token_ids": [
+      36971,
+      260,
+      3193,
+      826,
+      253,
+      17756,
+      284,
+      253,
+      29593,
+      281,
+      1296,
+      2437,
+      16425,
+      2876,
+      30,
+      2
+    ],
+    "tokens_per_second": 8.977831252910628,
+    "total_ms": 111.3854751586914,
+    "ttft_ms": 111.3854751586914,
+    "wall_total_ms": 112.08280001301318
+  },
+  "comparison": {
+    "reason": "Sidecar generation did not produce output",
+    "status": "skipped"
+  },
+  "device": "cuda",
+  "dtype": "float16",
+  "gpu": "NVIDIA GeForce RTX 3050 Laptop GPU",
+  "max_new_tokens": 16,
+  "measurement": "CUDA events for prefill/decode kernels; synchronized wall time recorded separately",
+  "model_id": "HuggingFaceTB/SmolLM2-135M-Instruct",
+  "prompt": "Explain the difference between a CPU and a GPU in three clear bullet points.",
+  "sidecar": {
+    "reason": "No --library supplied; baseline was run without claiming sidecar acceleration",
+    "status": "skipped"
+  },
+  "status": "completed",
+  "vram_capacity_mib": 4095.5
+}

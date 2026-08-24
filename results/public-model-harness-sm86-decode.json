@@ -1,0 +1,53 @@
+{
+  "baseline": {
+    "allocated_after_load_mib": 256.59130859375,
+    "generated_tokens": 16,
+    "itl_ms": 40.8913813273112,
+    "peak_vram_mib": 265.4189453125,
+    "status": "completed",
+    "text": "Once upon a time, I was a young man, a young woman, and a young man again",
+    "token_ids": [
+      6403,
+      1980,
+      253,
+      655,
+      28,
+      339,
+      436,
+      253,
+      1805,
+      555,
+      28,
+      253,
+      1805,
+      4166,
+      28,
+      284,
+      253,
+      1805,
+      555,
+      1163
+    ],
+    "tokens_per_second": 24.0434609146036,
+    "total_ms": 665.4616012573242,
+    "ttft_ms": 52.09088134765625,
+    "wall_total_ms": 670.00470001949
+  },
+  "comparison": {
+    "reason": "Sidecar generation did not produce output",
+    "status": "skipped"
+  },
+  "device": "cuda",
+  "dtype": "float16",
+  "gpu": "NVIDIA GeForce RTX 3050 Laptop GPU",
+  "max_new_tokens": 16,
+  "measurement": "CUDA events for prefill/decode kernels; synchronized wall time recorded separately",
+  "model_id": "HuggingFaceTB/SmolLM2-135M-Instruct",
+  "prompt": "Once upon a time",
+  "sidecar": {
+    "reason": "No --library supplied; baseline was run without claiming sidecar acceleration",
+    "status": "skipped"
+  },
+  "status": "completed",
+  "vram_capacity_mib": 4095.5
+}

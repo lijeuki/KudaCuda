@@ -1,0 +1,47 @@
+{
+  "project": "KudaCuda",
+  "families": {
+    "vector_add": {
+      "status": "pilot",
+      "implemented": true,
+      "fallback_required": false,
+      "correctness_gate": "tests/vector_add_smoke.cu"
+    },
+    "rmsnorm": {
+      "status": "pilot",
+      "implemented": true,
+      "fallback_required": false,
+      "correctness_gate": "tests/rmsnorm_smoke.cu"
+    },
+    "gqa8_attn": {
+      "status": "planned",
+      "implemented": false,
+      "fallback_required": true
+    },
+    "kv_cache": {
+      "status": "planned",
+      "implemented": false,
+      "fallback_required": true
+    },
+    "quantization": {
+      "status": "planned",
+      "implemented": false,
+      "fallback_required": true
+    },
+    "moe": {
+      "status": "planned",
+      "implemented": false,
+      "fallback_required": true
+    },
+    "routing": {
+      "status": "planned",
+      "implemented": false,
+      "fallback_required": true
+    },
+    "sampling": {
+      "status": "planned",
+      "implemented": false,
+      "fallback_required": true
+    }
+  }
+}
