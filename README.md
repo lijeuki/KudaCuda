@@ -1,3 +1,4 @@
+<img width="486" height="529" alt="image" src="https://github.com/user-attachments/assets/d19f7271-6c3f-4115-9075-e66c4978ab94" />
 # KudaCuda
 
 KudaCuda is a CUDA-first sidecar for direct PyTorch device-pointer dispatch. Its serving boundary is intentionally small:
