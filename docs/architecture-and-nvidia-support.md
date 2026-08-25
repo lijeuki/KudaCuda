@@ -30,7 +30,7 @@ The caller remains responsible for tensor ownership, stream ordering, synchroniz
 | CUDA Driver API / `nvcuda.dll` | Context retention, context selection, module load, function lookup, module unload | Registry implemented; Windows import library is generated from `runtime/nvcuda.def` |
 | CUDA streams | Caller-owned stream is passed through the C ABI without synchronization | Verified with a non-default stream |
 | CUDA Graphs | Capture, instantiate/replay, and destroy CUDA-only work; PyTorch `CUDAGraph` owns full-model graph memory pools | Vector-add and multi-launch replay verified; Qwen2 static decode captured/replayed with exact parity on RTX 3050 |
-| bitsandbytes NF4 storage contract | Python bridge validates packed `uint8` NF4 weights, FP32 block scales, blocksize 64, and FP16 projection biases before native dispatch | Real Qwen2.5-3B projection parity validated; tiled v2 adds constant-memory codebook, `uint4` loads, FP32 accumulation, and bias epilogue; model path remains experimental |
+| bitsandbytes NF4 storage contract | Python bridge validates packed `uint8` NF4 weights, FP32 block scales, blocksize 64, and FP16 projection biases before native dispatch | Real Qwen2.5-3B projection parity validated; tiled v2/v3 add constant-memory codebook, `uint4` loads, FP32 accumulation, bias epilogue, and v3 activation-tile reuse; model paths remain experimental |
 | CUBIN/PTX/fatbin | Architecture-specific kernel artifacts | `sm_86` artifact is published; build with `89` for L40S |
 | Ampere Tensor Cores | Planned INT4/INT8 and mixed-precision matrix paths | Not yet implemented |
 | Ada Tensor Cores / FP8 | Planned L40S FP8 E4M3 path | Not yet implemented |
@@ -61,6 +61,8 @@ Implemented native tactics:
 - `qwen2_fused_rmsnorm_qkv_sm86_nf4_v1`, a correctness-first NF4 fused RMSNorm-QKV path for the exact Qwen2.5-3B projection shapes; it is active only with the explicit fused flag.
 - `qwen2_fused_rmsnorm_qkv_sm86_nf4_v2`, an opt-in tiled NF4 GEMV path with stable FP32 RMSNorm workspace, constant-memory codebook, `uint4` loads, and bias epilogue; its sm86 audit reports 56 registers and zero spills.
 - `qwen2_fused_rmsnorm_qkv_sm89_nf4_v2`, compiled for the L40S target; runtime validation is pending on an L40S.
+- `qwen2_fused_rmsnorm_qkv_sm86_nf4_v3`, an opt-in two-output-row activation-tiled NF4 GEMV path that stages the normalized 2,048-element activation vector once per block; its sm86 audit reports 92 registers, 8,224 bytes of shared memory, and zero spills. Five model runs preserved exact parity but measured 8.04% below the existing graph median, so v3 is not promoted.
+- `qwen2_fused_rmsnorm_qkv_sm89_nf4_v3`, compiled for the L40S target; runtime validation is pending on an L40S.
 - `qwen2_gqa_decode_sm86_fp16_workspace_v3`, a fixed-capacity two-stage workspace reduction path validated for KV lengths 1, 7, 64, 128, and 512; it is active only with the explicit workspace flag.
 
 The opt-in graph tactics `qwen2_gqa_decode_sm86_fp16_graph_v1` and `qwen2_gqa_decode_sm89_fp16_graph_v1` use a fixed-capacity cache and a device-resident logical KV-length scalar. The Python `StaticDecodeGraphRunner` captures the full Qwen2 decode forward with PyTorch's graph allocator, while KudaCuda supplies the graph-safe native attention launch. Token sampling stays outside the captured graph.
@@ -73,11 +75,17 @@ Not yet production-ready:
 
 - Gemma GQA attention and KV-cache update;
 - a tuned fused residual/RMSNorm-QKV implementation, MLP, or production quantized matmul;
-- promoted Tensor-Core INT4/INT8 weight-only kernels; the current NF4 v2 path is a correctness-first tiled GEMV pilot and remains slower than the existing graph tactic on the RTX 3050;
+- promoted Tensor-Core INT4/INT8 weight-only kernels; the current NF4 v2/v3 paths are correctness-first tiled GEMV pilots and remain slower than the existing graph tactic on the RTX 3050;
 - FP8 kernels for L40S;
 - paged KV cache, continuous batching, and a serving scheduler.
 
 Therefore `gqa8_attn` remains `planned`, and the Qwen2 graph, NF4 fused-QKV, and workspace-GQA tactics remain `experimental` pending repeated promotion evidence. Qwen2 native dispatch is reported as active only when the DLL exports the Qwen symbol, the exact contract passes, and at least one native call succeeds; a manifest entry alone never activates it.
+
+## 300 tok/s stretch-target boundary
+
+The current verified whole-model result is 21.209 tok/s on the 4 GiB RTX 3050. The v3 experiment only replaces QKV and reaches 19.503 tok/s median, so it cannot be promoted or extrapolated to 300 tok/s. A credible path to that stretch target must cover the complete decoder workload: all large NF4 projections and MLP GEMVs, fused norm/residual boundaries, a stable full decode graph, and a serving definition that distinguishes single-stream latency from batched aggregate throughput. Paged KV and continuous batching remain future serving layers; offline weight-layout transforms such as SVDQuant/CALDERA-style residual decomposition require separate accuracy and memory experiments.
+
+The first eager operation profile now provides the ranking input: an instrumented decode step measured 61.726 ms of total attention work, 26.334 ms of total MLP work, 8.263 ms of input RMSNorm, and 8.418 ms of post-attention RMSNorm. Within those families, Q/K/V projections accounted for 15.146 ms per step, output projection 7.044 ms, and the MLP gate/up/down projections 10.657/6.868/6.059 ms. These are diagnostic event sums with hook overhead and are not a graph throughput claim; they identify the next native coverage priorities.
 
 ## Architecture portability
 

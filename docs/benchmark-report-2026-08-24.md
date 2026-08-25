@@ -91,15 +91,48 @@ Five paired four-token graph runs used the same D-drive checkpoint, prompt, 512-
 
 The v2 result is 8.61% below the existing graph sidecar, so it fails the 5% promotion gate and remains opt-in. It is substantially faster than the earlier v1 fused-QKV graph path (~5.1 tok/s), but the one-output-row NF4 GEMV still does not beat the framework's optimized quantized projection path. Evidence: [aggregate result](../results/qwen25-3b-sm86-nf4-tiled-gemv-final.json), [baseline repeat 1](../results/qwen25-3b-sm86-nf4-baseline-repeat-1.json), and [tiled repeat 1](../results/qwen25-3b-sm86-nf4-tiled-gemv-repeat-1.json).
 
+### Multi-row activation-tiled NF4 GEMV v3 — 2026-08-25
+
+The v3 follow-up maps two output rows to each 64-thread block and stages the normalized 2,048-element activation vector once in shared memory. It retains v2's constant-memory NF4 codebook, `uint4` packed-weight loads, blocksize-64 scales, FP32 accumulation, bias epilogue, stable workspace, and versioned fallback contract. The sm86 audit reports 92 registers, 8,224 bytes of shared memory, and zero spill stores/loads; sm89 compilation also completed, but no L40S runtime was available.
+
+Five paired four-token graph runs used the same D-drive Qwen2.5-3B NF4 checkpoint and fixed 512-token graph bucket:
+
+| Mode | Median throughput | Median peak VRAM | Dispatch/parity | Status |
+|---|---:|---:|---|---|
+| Existing graph sidecar | 21.209 tok/s | 2,135.6 MiB | Exact | Default |
+| Tiled NF4 GEMV v2 | 19.382 tok/s | 2,136.1 MiB | 36 v2 dispatches; exact | Experimental |
+| Multi-row NF4 GEMV v3 | 19.503 tok/s | 2,136.1 MiB | 36 v3 dispatches; exact | Experimental; not promoted |
+
+V3 is 8.04% below the existing graph median, so it fails the `>=5%` promotion gate even though native correctness and zero-spill checks pass. Its paired vanilla comparison is not the promotion baseline because the graph tactic already removes the dominant host-launch overhead. A subsequent five-run graph-control batch was clock-state contaminated (median 8.577 tok/s and P8/210 MHz observed between processes); those files are retained as diagnostics and excluded from the aggregate. Evidence: [v3 aggregate](../results/qwen25-3b-sm86-nf4-gemv-v3-final.json), [v3 repeat 1](../results/qwen25-3b-sm86-nf4-gemv-v3-repeat-1.json), and [native smoke](../artifacts/sm86/kudacuda_nf4_tiled_gemv_smoke.exe).
+
+The 300 tok/s goal is therefore still a stretch target, not an achieved result. The next measured phase must rank all decoder projections, MLP GEMVs, RMSNorm/residual boundaries, graph overhead, and clock/allocator variance before choosing the next kernel family. QKV-only optimization cannot provide the required whole-model multiplier.
+
+### Fused NF4 SwiGLU experiment — 2026-08-25
+
+The deeper operation profile ranked the MLP path as the next native-family candidate: post-attention RMSNorm, gate, up, and SiLU accounted for about 25.94 ms of the inclusive eager profile. The implementation therefore added an opt-in layer-boundary patch for Qwen2.5-3B that fuses post-attention RMSNorm, non-nested NF4 gate/up projections, SiLU, and the gate/up product, then leaves the down projection in the framework. The patch wraps the decoder layer rather than `mlp.forward`, because Hugging Face applies post-attention RMSNorm before entering the MLP; an MLP-only patch would normalize twice.
+
+The independent sm86 reference smoke passed. Both `sm_86` and `sm_89` builds completed. The sm86 ptxas audit reported 56 registers, 8,264 bytes of shared memory, a 32-byte stack frame, and zero spill stores/loads. A four-output-row activation-tiled revision reused one normalized activation tile across rows, but it did not overcome the handwritten scalar NF4 projection cost.
+
+Five four-token graph controls and five fused-SwiGLU graph runs on the RTX 3050 produced:
+
+| Mode | Median throughput | Median peak VRAM | Parity | Promotion |
+|---|---:|---:|---|---|
+| Vanilla eager without sidecar | 15.091 tok/s | 2,109.7 MiB | — | Reference |
+| Existing graph without fused SwiGLU | 22.333 tok/s | 2,135.6 MiB | Exact | Current default |
+| Fused NF4 SwiGLU graph | 13.335 tok/s | 2,136.4 MiB | Exact; 36 native dispatches | Not promoted |
+
+The fused path was 40.29% slower than its fresh graph control and 37.13% below the established 21.209 tok/s graph baseline. The kernel is functionally active and compiler-clean, but bitsandbytes' optimized quantized projection path is substantially faster than this scalar NF4 dot-product implementation. The tactic remains explicit opt-in; the static graph remains the main local path. Evidence: [SwiGLU aggregate](../results/qwen25-3b-sm86-nf4-swiglu-final.json), [v2 run](../results/qwen25-3b-sm86-nf4-swiglu-v2.json), [graph control](../results/qwen25-3b-sm86-nf4-swiglu-control-v2.json), and [native smoke](../artifacts/sm86/kudacuda_nf4_swiglu_smoke.exe).
+
 ## Full verification matrix
 
-- Python contract/tooling suite: 42/42 passed with `pytest`.
+- Python contract/tooling suite: 46/46 passed with `pytest`.
 - Python compilation: passed for all tracked Python files.
 - Native vector-add smoke: passed with a caller-owned non-default stream and CUDA Graph replay.
 - Native RMSNorm smoke: passed against an independent FP64 reference.
 - Native Qwen2 GQA smoke: passed against an independent FP32 reference.
 - Native fused RMSNorm-QKV smoke: passed against an independent FP32 reference.
-- Native tiled NF4 GEMV smoke: passed against an independent FP32 reference; sm86 and sm89 targets compile.
+- Native tiled NF4 GEMV v2/v3 smoke: passed against an independent FP32 reference; sm86 and sm89 targets compile.
+- Native fused NF4 SwiGLU smoke: passed against an independent FP32 reference; sm86 and sm89 targets compile; five-run model parity exact.
 - Native CUDA Graph multi-launch smoke: passed against an independent reference.
 - Qwen2 static decode CUDA Graph: captured/replayed with exact token/text parity; 36 native attention dispatches were recorded during capture.
 - Experimental Qwen2 GQA variants: correctness passed; group-tiled and vectorized tactics were not promoted after direct-event comparison.
@@ -131,11 +164,11 @@ The native ABI, stream forwarding, graph lifecycle, RMSNorm correctness, and GPU
 
 ## Phase 2/3 execution result — 2026-08-25
 
-The approved NF4 fused RMSNorm-QKV and fixed-workspace GQA plan was implemented and tested against the real Qwen2.5-3B NF4 checkpoint stored on the D drive.
+The approved NF4 fused RMSNorm-QKV, fixed-workspace GQA, and fused NF4 SwiGLU plans were implemented and tested against the real Qwen2.5-3B NF4 checkpoint stored on the D drive. The SwiGLU tactic is retained as experimental after the repeat benchmark failed the no-regression gate.
 
 ### Correctness and ABI evidence
 
-- Python contract suite: `41/41` tests passed after updating the graph test double for the optional workspace pointer.
+- Python contract suite: `46/46` tests passed after adding the fused SwiGLU layer-boundary contract and model test double.
 - Python compilation, manifest JSON parsing, and `git diff --check`: passed.
 - RTX 3050 native smoke matrix: vector-add, FP32 RMSNorm, Qwen2 GQA, fused FP16 RMSNorm-QKV, NF4 fused RMSNorm-QKV, workspace GQA, and CUDA Graph replay all passed.
 - Real projection parity against bitsandbytes dequantization plus FP32 matmul: Q max absolute error `0.0078125`, K `0.001953125`, V `0.00048828125`; the native ABI also includes the model's nonzero Q/K/V FP16 biases.

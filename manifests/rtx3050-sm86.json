@@ -4,10 +4,12 @@
   "device_name": "NVIDIA RTX 3050 Laptop GPU",
   "preferred_qwen_fused_qkv_tactic": "qwen2_fused_rmsnorm_qkv_sm86_nf4_v1",
   "preferred_qwen_tiled_nf4_gemv_tactic": "qwen2_fused_rmsnorm_qkv_sm86_nf4_v2",
+  "preferred_qwen_tiled_nf4_gemv_v3_tactic": "qwen2_fused_rmsnorm_qkv_sm86_nf4_v3",
+  "preferred_qwen_swiglu_tactic": "qwen2_swiglu_sm86_nf4_v1",
   "warp_size": 32,
   "shared_memory_kb": 100,
   "implemented_tactics": ["vector_add", "rmsnorm", "qwen2_gqa_decode_sm86_fp16"],
-  "experimental_tactics": ["qwen2_gqa_decode_sm86_fp16_group_tiled_v2", "qwen2_gqa_decode_sm86_fp16_vectorized_v2", "qwen2_gqa_decode_sm86_fp16_graph_v1", "qwen2_gqa_decode_sm86_fp16_workspace_v3", "qwen2_fused_rmsnorm_qkv_sm86_nf4_v1", "qwen2_fused_rmsnorm_qkv_sm86_nf4_v2"],
+  "experimental_tactics": ["qwen2_gqa_decode_sm86_fp16_group_tiled_v2", "qwen2_gqa_decode_sm86_fp16_vectorized_v2", "qwen2_gqa_decode_sm86_fp16_graph_v1", "qwen2_gqa_decode_sm86_fp16_workspace_v3", "qwen2_fused_rmsnorm_qkv_sm86_nf4_v1", "qwen2_fused_rmsnorm_qkv_sm86_nf4_v2", "qwen2_fused_rmsnorm_qkv_sm86_nf4_v3", "qwen2_swiglu_sm86_nf4_v1"],
   "planned_tactics": ["gqa8_attn", "kv_cache", "quantization", "moe", "routing", "sampling"],
   "precision_support": ["float32", "float16", "bfloat16", "tf32", "int8", "int4"],
   "contracts": {
@@ -100,6 +102,31 @@
       "quant_type": "nf4",
       "blocksize": 64,
       "normalized_workspace_dtype": "float32"
+    },
+    "qwen2_fused_rmsnorm_qkv_sm86_nf4_v3": {
+      "dtype": "float16",
+      "layout": "contiguous",
+      "batch_size": 1,
+      "query_len": 1,
+      "hidden_size": 2048,
+      "query_output_size": 2048,
+      "kv_output_size": 256,
+      "quant_type": "nf4",
+      "blocksize": 64,
+      "normalized_workspace_dtype": "float32",
+      "output_rows_per_block": 2
+    },
+    "qwen2_swiglu_sm86_nf4_v1": {
+      "dtype": "float16",
+      "layout": "contiguous",
+      "batch_size": 1,
+      "query_len": 1,
+      "hidden_size": 2048,
+      "intermediate_size": 11008,
+      "quant_type": "nf4",
+      "blocksize": 64,
+      "bias": false,
+      "activation": "silu"
     }
   }
 }

@@ -1,0 +1,79 @@
+{
+  "status": "completed",
+  "experiment": "Qwen2.5-3B NF4 fused post-attention SwiGLU",
+  "run_date": "2026-08-25",
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 3050 Laptop GPU",
+    "vram_mib": 4095.5,
+    "target_arch": "sm_86",
+    "driver": "610.88",
+    "cuda": "13.3",
+    "nvcc": "13.3.73"
+  },
+  "model": {
+    "path": "D:\\AI\\Models\\HuggingFace\\hub\\models--Qwen--Qwen2.5-3B-Instruct\\snapshots\\aa8e72537993ba99e69dfaafa59ed015b17504d1",
+    "quantization": "bitsandbytes NF4",
+    "dtype": "float16",
+    "decode_tokens": 4,
+    "graph_kv_bucket": 512
+  },
+  "contract": {
+    "input": "FP16 (1, 2048)",
+    "post_attention_norm": "FP16 (2048)",
+    "gate_up_weights": "non-nested NF4 uint8 packed (11008, 2048), blocksize 64",
+    "output": "FP16 (1, 11008)",
+    "native_dispatches_per_run": 36,
+    "exact_token_parity": true,
+    "exact_text_parity": true
+  },
+  "throughput_tok_per_s": {
+    "vanilla_eager_without_sidecar_median": 15.091,
+    "graph_without_swiglu_median": 22.333,
+    "fused_swiglu_graph_median": 13.335,
+    "fused_swiglu_vs_vanilla_eager_percent": -11.63,
+    "fused_swiglu_vs_graph_control_percent": -40.29,
+    "fused_swiglu_vs_established_graph_baseline_percent": -37.13,
+    "established_graph_baseline": 21.209
+  },
+  "five_run_control_sidecar": [
+    21.552,
+    20.927,
+    22.767,
+    22.333,
+    23.351
+  ],
+  "five_run_fused_swiglu_sidecar": [
+    12.812,
+    12.028,
+    13.951,
+    14.184,
+    13.335
+  ],
+  "memory_mib": {
+    "graph_without_swiglu_median": 2135.6,
+    "fused_swiglu_median": 2136.4,
+    "delta_mib": 0.8
+  },
+  "native_validation": {
+    "sm86_compile": "passed",
+    "sm89_compile": "passed",
+    "sm86_reference_smoke": "passed",
+    "ptxas_registers": 56,
+    "ptxas_shared_memory_bytes": 8264,
+    "ptxas_stack_frame_bytes": 32,
+    "ptxas_spill_stores": 0,
+    "ptxas_spill_loads": 0
+  },
+  "promotion": {
+    "required_minimum_tok_per_s": 22.269,
+    "required_relative_gain": 0.05,
+    "promoted_to_main": false,
+    "reason": "Exact and compiler-clean, but the handwritten NF4 projection path is 40.29% slower than the graph control and 37.13% below the established graph baseline. Keep qwen2_swiglu_sm86_nf4_v1 opt-in experimental."
+  },
+  "evidence": {
+    "first_active_run": "qwen25-3b-sm86-nf4-swiglu-active.json",
+    "v2_first_run": "qwen25-3b-sm86-nf4-swiglu-v2.json",
+    "control_first_run": "qwen25-3b-sm86-nf4-swiglu-control-v2.json",
+    "native_smoke": "../artifacts/sm86/kudacuda_nf4_swiglu_smoke.exe"
+  }
+}

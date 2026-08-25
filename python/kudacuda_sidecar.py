@@ -221,6 +221,9 @@ class KudaCudaBridge:
         self.native_attention_dispatches = 0
         self.native_fused_qkv_dispatches = 0
         self.native_fused_qkv_v2_dispatches = 0
+        self.native_fused_qkv_v3_dispatches = 0
+        self.native_swiglu_dispatches = 0
+        self.native_swiglu_hook_calls = 0
         self._graph_kv_len_device: Any = None
         self._graph_kv_capacity: int | None = None
         self._graph_workspace: Any = None
@@ -370,6 +373,28 @@ class KudaCudaBridge:
                 + [ctypes.c_float, ctypes.c_uint64]
             )
             self._qwen2_fused_rmsnorm_qkv_nf4_v2.restype = ctypes.c_int
+        self._qwen2_fused_rmsnorm_qkv_nf4_v3 = getattr(
+            self.lib,
+            "kudacuda_qwen2_fused_rmsnorm_qkv_nf4_v3",
+            None,
+        )
+        if self._qwen2_fused_rmsnorm_qkv_nf4_v3 is not None:
+            self._qwen2_fused_rmsnorm_qkv_nf4_v3.argtypes = (
+                [ctypes.c_void_p]
+                + [ctypes.c_uint64] * 15
+                + [ctypes.c_int64] * 5
+                + [ctypes.c_float, ctypes.c_uint64]
+            )
+            self._qwen2_fused_rmsnorm_qkv_nf4_v3.restype = ctypes.c_int
+        self._qwen2_swiglu_nf4 = getattr(self.lib, "kudacuda_qwen2_swiglu_nf4", None)
+        if self._qwen2_swiglu_nf4 is not None:
+            self._qwen2_swiglu_nf4.argtypes = (
+                [ctypes.c_void_p]
+                + [ctypes.c_uint64] * 7
+                + [ctypes.c_int64] * 4
+                + [ctypes.c_float, ctypes.c_uint64]
+            )
+            self._qwen2_swiglu_nf4.restype = ctypes.c_int
         self.lib.kudacuda_begin_capture.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
         self.lib.kudacuda_begin_capture.restype = ctypes.c_int
         self.lib.kudacuda_end_capture.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
@@ -426,10 +451,14 @@ class KudaCudaBridge:
         if tactic_name.startswith("qwen2_gqa_decode_") and self._qwen_symbol(tactic_name) is None:
             return "unavailable"
         if tactic_name.startswith("qwen2_fused_rmsnorm_qkv_"):
+            if tactic_name.endswith("_v3") and self._qwen2_fused_rmsnorm_qkv_nf4_v3 is None:
+                return "unavailable"
             if tactic_name.endswith("_v2") and self._qwen2_fused_rmsnorm_qkv_nf4_v2 is None:
                 return "unavailable"
-            if not tactic_name.endswith("_v2") and self._qwen2_fused_rmsnorm_qkv_nf4 is None:
+            if not tactic_name.endswith(("_v2", "_v3")) and self._qwen2_fused_rmsnorm_qkv_nf4 is None:
                 return "unavailable"
+        if tactic_name.startswith("qwen2_swiglu_") and self._qwen2_swiglu_nf4 is None:
+            return "unavailable"
         if tactic_name in self.implemented_tactics:
             return "implemented"
         if tactic_name in self.experimental_tactics:
@@ -1033,11 +1062,13 @@ class KudaCudaBridge:
         if self._closed:
             raise NativeCudaError("KudaCuda bridge is closed")
         is_v2 = tactic_name.endswith("_v2")
-        native_function = (
-            self._qwen2_fused_rmsnorm_qkv_nf4_v2
-            if is_v2
-            else self._qwen2_fused_rmsnorm_qkv_nf4
-        )
+        is_v3 = tactic_name.endswith("_v3")
+        is_tiled = is_v2 or is_v3
+        native_function = self._qwen2_fused_rmsnorm_qkv_nf4
+        if is_v2:
+            native_function = self._qwen2_fused_rmsnorm_qkv_nf4_v2
+        elif is_v3:
+            native_function = self._qwen2_fused_rmsnorm_qkv_nf4_v3
         if native_function is None:
             raise NativeCudaError(
                 "native library does not export the requested NF4 fused QKV ABI"
@@ -1093,7 +1124,7 @@ class KudaCudaBridge:
                 raise ValueError(f"{label} must be contiguous CUDA float16 rank-2")
             if tuple(int(value) for value in tensor.shape) != shape:
                 raise ValueError(f"{label} must have shape {shape}")
-        if is_v2:
+        if is_tiled:
             if not self._tensor_contract_matches(normalized_workspace, dtype="float32", rank=2):
                 raise ValueError("normalized_workspace must be contiguous CUDA float32 rank-2")
             if tuple(int(value) for value in normalized_workspace.shape) != (rows, hidden):
@@ -1114,7 +1145,7 @@ class KudaCudaBridge:
             self._tensor_pointer(v_absmax, "v_absmax"),
             self._tensor_pointer(v_bias, "v_bias"),
         ]
-        if is_v2:
+        if is_tiled:
             native_args.append(self._tensor_pointer(normalized_workspace, "normalized_workspace"))
         native_args.extend(
             [
@@ -1135,6 +1166,79 @@ class KudaCudaBridge:
         self.native_fused_qkv_dispatches += 1
         if is_v2:
             self.native_fused_qkv_v2_dispatches += 1
+        if is_v3:
+            self.native_fused_qkv_v3_dispatches += 1
+
+    def dispatch_qwen2_swiglu_nf4(
+        self,
+        input_tensor: Any,
+        norm_weight: Any,
+        gate_weight: Any,
+        gate_absmax: Any,
+        up_weight: Any,
+        up_absmax: Any,
+        output: Any,
+        *,
+        epsilon: float = 1.0e-5,
+        stream_ptr: int,
+        tactic_name: str = "qwen2_swiglu_sm86_nf4_v1",
+    ) -> None:
+        """Launch the exact Qwen2.5-3B NF4 fused post-attention SwiGLU contract."""
+
+        if self._closed:
+            raise NativeCudaError("KudaCuda bridge is closed")
+        if self._qwen2_swiglu_nf4 is None:
+            raise NativeCudaError("native library does not export the NF4 SwiGLU ABI")
+        if tactic_name not in self.implemented_tactics and tactic_name not in self.experimental_tactics:
+            raise NativeCudaError(f"{tactic_name} is not enabled by this manifest")
+        if not self._tensor_contract_matches(input_tensor, dtype="float16", rank=2):
+            raise ValueError("input must be contiguous CUDA float16 rank-2")
+        if not self._tensor_contract_matches(norm_weight, dtype="float16", rank=1):
+            raise ValueError("norm_weight must be contiguous CUDA float16 rank-1")
+        input_shape = tuple(int(value) for value in input_tensor.shape)
+        norm_shape = tuple(int(value) for value in norm_weight.shape)
+        rows, hidden = input_shape
+        if input_shape != (1, 2048) or norm_shape != (2048,):
+            raise ValueError("NF4 SwiGLU requires input (1, 2048) and norm_weight (2048,)")
+        gate_blocksize = self._validate_nf4_weight(
+            gate_weight,
+            gate_absmax,
+            expected_shape=(11008, 2048),
+            label="gate_weight",
+        )
+        up_blocksize = self._validate_nf4_weight(
+            up_weight,
+            up_absmax,
+            expected_shape=(11008, 2048),
+            label="up_weight",
+        )
+        if gate_blocksize != 64 or up_blocksize != 64:
+            raise ValueError("NF4 SwiGLU block sizes must be 64")
+        if not self._tensor_contract_matches(output, dtype="float16", rank=2):
+            raise ValueError("output must be contiguous CUDA float16 rank-2")
+        if tuple(int(value) for value in output.shape) != (rows, 11008):
+            raise ValueError("output must have shape (1, 11008)")
+        if epsilon <= 0.0:
+            raise ValueError("epsilon must be positive")
+        native_args = [
+            self.engine_handle,
+            self._tensor_pointer(input_tensor, "input"),
+            self._tensor_pointer(norm_weight, "norm_weight"),
+            self._tensor_pointer(gate_weight, "gate_weight"),
+            self._tensor_pointer(gate_absmax, "gate_absmax"),
+            self._tensor_pointer(up_weight, "up_weight"),
+            self._tensor_pointer(up_absmax, "up_absmax"),
+            self._tensor_pointer(output, "output"),
+            rows,
+            hidden,
+            11008,
+            64,
+            float(epsilon),
+            _normalize_cuda_handle(stream_ptr),
+        ]
+        status = self._qwen2_swiglu_nf4(*native_args)
+        self._raise_if_failed(status, tactic_name)
+        self.native_swiglu_dispatches += 1
 
     def dispatch_qwen2_fused_rmsnorm_qkv_nf4_v2(
         self,
@@ -1157,6 +1261,49 @@ class KudaCudaBridge:
         epsilon: float = 1.0e-5,
         stream_ptr: int,
         tactic_name: str = "qwen2_fused_rmsnorm_qkv_sm86_nf4_v2",
+    ) -> None:
+        self.dispatch_qwen2_fused_rmsnorm_qkv_nf4(
+            input_tensor,
+            norm_weight,
+            q_weight,
+            q_absmax,
+            q_bias,
+            k_weight,
+            k_absmax,
+            k_bias,
+            v_weight,
+            v_absmax,
+            v_bias,
+            q_output,
+            k_output,
+            v_output,
+            normalized_workspace=normalized_workspace,
+            epsilon=epsilon,
+            stream_ptr=stream_ptr,
+            tactic_name=tactic_name,
+        )
+
+    def dispatch_qwen2_fused_rmsnorm_qkv_nf4_v3(
+        self,
+        input_tensor: Any,
+        norm_weight: Any,
+        q_weight: Any,
+        q_absmax: Any,
+        q_bias: Any,
+        k_weight: Any,
+        k_absmax: Any,
+        k_bias: Any,
+        v_weight: Any,
+        v_absmax: Any,
+        v_bias: Any,
+        q_output: Any,
+        k_output: Any,
+        v_output: Any,
+        *,
+        normalized_workspace: Any,
+        epsilon: float = 1.0e-5,
+        stream_ptr: int,
+        tactic_name: str = "qwen2_fused_rmsnorm_qkv_sm86_nf4_v3",
     ) -> None:
         self.dispatch_qwen2_fused_rmsnorm_qkv_nf4(
             input_tensor,
@@ -1363,6 +1510,186 @@ def prepare_qwen2_fused_qkv(
             "key": torch_module.empty((1, 256), device=device, dtype=dtype),
             "value": torch_module.empty((1, 256), device=device, dtype=dtype),
         }
+
+
+def prepare_qwen2_swiglu(
+    model: Any,
+    *,
+    torch_module: Any = None,
+) -> None:
+    """Allocate one stable NF4 SwiGLU output workspace per Qwen2 layer."""
+
+    if torch_module is None:
+        import torch as torch_module
+
+    layers = getattr(getattr(model, "model", None), "layers", None)
+    if layers is None:
+        raise ValueError("Qwen2 model does not expose model.layers")
+    for layer in layers:
+        mlp = getattr(layer, "mlp", None)
+        norm = getattr(layer, "post_attention_layernorm", None)
+        norm_weight = getattr(norm, "weight", None)
+        if mlp is None or norm_weight is None:
+            raise ValueError("Qwen2 decoder layer is missing mlp or post-attention layernorm")
+        layer._kudacuda_swiglu_state = {
+            "output": torch_module.empty((1, 11008), device=norm_weight.device, dtype=norm_weight.dtype),
+        }
+
+
+def patch_qwen2_swiglu(
+    model: Any,
+    bridge: Any,
+    *,
+    tactic_name: str = "qwen2_swiglu_sm86_nf4_v1",
+    prepare: bool = True,
+    torch_module: Any = None,
+) -> Callable[[], None]:
+    """Patch exact Qwen2 decoder layers to use native fused post-attention SwiGLU."""
+
+    layers = getattr(getattr(model, "model", None), "layers", None)
+    if layers is None:
+        raise ValueError("Qwen2 model does not expose decoder layers")
+    layers = list(layers)
+    if not layers:
+        raise ValueError("Qwen2 model does not expose decoder layers")
+    marker = object()
+    originals: list[tuple[Any, Any, Any]] = [
+        (layer, layer.forward, getattr(layer, "_kudacuda_swiglu_state", marker))
+        for layer in layers
+    ]
+    if prepare:
+        prepare_qwen2_swiglu(model, torch_module=torch_module)
+
+    for layer, original_forward, _previous_state in originals:
+
+        def swiglu_forward(
+            self: Any,
+            hidden_states: Any,
+            attention_mask: Any = None,
+            position_ids: Any = None,
+            past_key_values: Any = None,
+            use_cache: Any = False,
+            position_embeddings: Any = None,
+            _layer: Any = layer,
+            _original_forward: Any = original_forward,
+            **kwargs: Any,
+        ) -> Any:
+            bridge.native_swiglu_hook_calls = int(getattr(bridge, "native_swiglu_hook_calls", 0)) + 1
+            shape = tuple(int(value) for value in getattr(hidden_states, "shape", ()))
+            if shape != (1, 1, 2048):
+                bridge.last_swiglu_dispatch_reason = f"shape:{shape}"
+                return _original_forward(
+                    hidden_states,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_values=past_key_values,
+                    use_cache=use_cache,
+                    position_embeddings=position_embeddings,
+                    **kwargs,
+                )
+            state = getattr(_layer, "_kudacuda_swiglu_state", None)
+            if not isinstance(state, dict) or "output" not in state:
+                bridge.last_swiglu_dispatch_reason = "missing_workspace"
+                return _original_forward(
+                    hidden_states,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_values=past_key_values,
+                    use_cache=use_cache,
+                    position_embeddings=position_embeddings,
+                    **kwargs,
+                )
+            try:
+                residual = hidden_states
+                normalized_hidden_states = _layer.input_layernorm(hidden_states)
+                attention_output, _ = _layer.self_attn(
+                    hidden_states=normalized_hidden_states,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_values=past_key_values,
+                    use_cache=use_cache,
+                    position_embeddings=position_embeddings,
+                    **kwargs,
+                )
+                hidden_states = residual + attention_output
+                residual = hidden_states
+
+                def framework_mlp(value: Any) -> Any:
+                    normalized = _layer.post_attention_layernorm(value)
+                    return value + _layer.mlp(normalized)
+
+                input_tensor = hidden_states.reshape(1, 2048)
+                if not bool(input_tensor.is_contiguous()):
+                    bridge.last_swiglu_dispatch_reason = "non_contiguous_input"
+                    return framework_mlp(residual)
+                gate_projection = _layer.mlp.gate_proj
+                up_projection = _layer.mlp.up_proj
+                gate_weight = gate_projection.weight
+                up_weight = up_projection.weight
+                gate_state = getattr(gate_weight, "quant_state", None)
+                up_state = getattr(up_weight, "quant_state", None)
+                if gate_state is None or up_state is None:
+                    bridge.last_swiglu_dispatch_reason = "missing_quant_state"
+                    return framework_mlp(residual)
+                if getattr(gate_projection, "bias", None) is not None or getattr(up_projection, "bias", None) is not None:
+                    bridge.last_swiglu_dispatch_reason = "unexpected_projection_bias"
+                    return framework_mlp(residual)
+                if torch_module is None:
+                    import torch as runtime_torch
+
+                    stream_ptr = int(runtime_torch.cuda.current_stream(input_tensor.device).cuda_stream)
+                else:
+                    stream_ptr = int(torch_module.cuda.current_stream(input_tensor.device).cuda_stream)
+                bridge.dispatch_qwen2_swiglu_nf4(
+                    input_tensor,
+                    _layer.post_attention_layernorm.weight,
+                    gate_weight,
+                    gate_state.absmax,
+                    up_weight,
+                    up_state.absmax,
+                    state["output"],
+                    epsilon=float(getattr(_layer.post_attention_layernorm, "variance_epsilon", 1.0e-6)),
+                    stream_ptr=stream_ptr,
+                    tactic_name=tactic_name,
+                )
+                bridge.last_swiglu_dispatch_reason = "native"
+                hidden_states = _layer.mlp.down_proj(state["output"].reshape(1, 1, 11008))
+                return residual + hidden_states
+            except Exception as error:
+                bridge.last_swiglu_dispatch_reason = f"fallback:{type(error).__name__}:{error}"
+                if "residual" in locals():
+                    normalized = _layer.post_attention_layernorm(residual)
+                    return residual + _layer.mlp(normalized)
+                return _original_forward(
+                    hidden_states,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_values=past_key_values,
+                    use_cache=use_cache,
+                    position_embeddings=position_embeddings,
+                    **kwargs,
+                )
+
+        layer.forward = MethodType(swiglu_forward, layer)
+
+    restored = False
+
+    def unpatch() -> None:
+        nonlocal restored
+        if restored:
+            return
+        for layer, original_forward, previous_state in originals:
+            layer.forward = original_forward
+            if previous_state is marker:
+                try:
+                    delattr(layer, "_kudacuda_swiglu_state")
+                except AttributeError:
+                    pass
+            else:
+                layer._kudacuda_swiglu_state = previous_state
+        restored = True
+
+    return unpatch
 
 
 def patch_qwen2_fused_qkv(

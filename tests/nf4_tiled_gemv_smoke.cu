@@ -153,6 +153,18 @@ int main(int argc, char** argv) {
         std::cerr << kudacuda_last_error(handle) << '\n';
         goto cleanup;
     }
+    if (kudacuda_qwen2_fused_rmsnorm_qkv_nf4_v3(
+            handle,
+            reinterpret_cast<uint64_t>(d_input), reinterpret_cast<uint64_t>(d_norm_weight),
+            reinterpret_cast<uint64_t>(d_q_weight), reinterpret_cast<uint64_t>(d_q_scales), reinterpret_cast<uint64_t>(d_q_bias),
+            reinterpret_cast<uint64_t>(d_k_weight), reinterpret_cast<uint64_t>(d_k_scales), reinterpret_cast<uint64_t>(d_k_bias),
+            reinterpret_cast<uint64_t>(d_v_weight), reinterpret_cast<uint64_t>(d_v_scales), reinterpret_cast<uint64_t>(d_v_bias),
+            reinterpret_cast<uint64_t>(d_normalized), reinterpret_cast<uint64_t>(d_q_output),
+            reinterpret_cast<uint64_t>(d_k_output), reinterpret_cast<uint64_t>(d_v_output),
+            1, hidden, q_out, kv_out, 64, epsilon, reinterpret_cast<uint64_t>(stream)) != 0) {
+        std::cerr << kudacuda_last_error(handle) << '\n';
+        goto cleanup;
+    }
     if (!check(cudaMemcpyAsync(q_output.data(), d_q_output, q_output.size() * sizeof(__half), cudaMemcpyDeviceToHost, stream), "copy q output")) goto cleanup;
     if (!check(cudaMemcpyAsync(k_output.data(), d_k_output, k_output.size() * sizeof(__half), cudaMemcpyDeviceToHost, stream), "copy k output")) goto cleanup;
     if (!check(cudaMemcpyAsync(v_output.data(), d_v_output, v_output.size() * sizeof(__half), cudaMemcpyDeviceToHost, stream), "copy v output")) goto cleanup;
@@ -160,7 +172,7 @@ int main(int argc, char** argv) {
     for (std::size_t i = 0; i < q_output.size(); ++i) if (std::fabs(__half2float(q_output[i]) - __half2float(q_expected[i])) > tolerance) goto cleanup;
     for (std::size_t i = 0; i < k_output.size(); ++i) if (std::fabs(__half2float(k_output[i]) - __half2float(k_expected[i])) > tolerance || std::fabs(__half2float(v_output[i]) - __half2float(v_expected[i])) > tolerance) goto cleanup;
 
-    std::cout << "KudaCuda tiled NF4 GEMV output matched the independent FP32 reference\n";
+    std::cout << "KudaCuda tiled NF4 GEMV v2/v3 output matched the independent FP32 reference\n";
     exit_code = 0;
 
 cleanup:

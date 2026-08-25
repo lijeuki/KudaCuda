@@ -1,0 +1,127 @@
+{
+  "status": "completed",
+  "experiment": "Qwen2.5-3B NF4 multi-row activation-tiled GEMV v3 inside static CUDA Graph",
+  "date": "2026-08-25",
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 3050 Laptop GPU",
+    "vram_capacity_mib": 4095.5,
+    "cuda": "13.3",
+    "architecture": "sm_86",
+    "driver": "610.88"
+  },
+  "contract": {
+    "model": "Qwen2.5-3B-Instruct",
+    "quantization": "bitsandbytes NF4",
+    "blocksize": 64,
+    "dtype": "float16",
+    "rows_per_block": 2,
+    "hidden": 2048,
+    "q_out": 2048,
+    "kv_out": 256,
+    "graph_kv_bucket": 512,
+    "max_new_tokens": 4
+  },
+  "ptxas_sm86": {
+    "nf4_tiled_qkv_gemv_v3_registers": 92,
+    "nf4_tiled_qkv_gemv_v3_spill_stores_bytes": 0,
+    "nf4_tiled_qkv_gemv_v3_spill_loads_bytes": 0,
+    "nf4_tiled_qkv_gemv_v3_shared_memory_bytes": 8224,
+    "nf4_tiled_qkv_gemv_v2_registers": 56,
+    "nf4_tiled_qkv_gemv_v2_spill_stores_bytes": 0,
+    "nf4_tiled_qkv_gemv_v2_spill_loads_bytes": 0,
+    "nf4_tiled_rmsnorm_registers": 25,
+    "nf4_tiled_rmsnorm_spill_stores_bytes": 0,
+    "nf4_tiled_rmsnorm_spill_loads_bytes": 0
+  },
+  "runs": [
+    {
+      "repeat": 1,
+      "baseline_tok_s": 15.458930588741769,
+      "v3_tok_s": 19.502940834532403,
+      "baseline_ttft_ms": 66.3990707397461,
+      "v3_ttft_ms": 71.36780548095703,
+      "v3_itl_ms": 44.57648950385434,
+      "v3_peak_vram_mib": 2136.07958984375,
+      "token_match": true,
+      "text_match": true,
+      "native_v3_dispatches": 36,
+      "graph_replays": 3
+    },
+    {
+      "repeat": 2,
+      "baseline_tok_s": 15.41513424484151,
+      "v3_tok_s": 21.157908126646607,
+      "baseline_ttft_ms": 73.0722885131836,
+      "v3_ttft_ms": 66.54508972167969,
+      "v3_itl_ms": 40.83650566766543,
+      "v3_peak_vram_mib": 2136.07958984375,
+      "token_match": true,
+      "text_match": true,
+      "native_v3_dispatches": 36,
+      "graph_replays": 3
+    },
+    {
+      "repeat": 3,
+      "baseline_tok_s": 4.7237633919347175,
+      "v3_tok_s": 9.41212069279187,
+      "baseline_ttft_ms": 321.4632873535156,
+      "v3_ttft_ms": 162.8745574951172,
+      "v3_itl_ms": 87.36978935966424,
+      "v3_peak_vram_mib": 2136.07958984375,
+      "token_match": true,
+      "text_match": true,
+      "native_v3_dispatches": 36,
+      "graph_replays": 3
+    },
+    {
+      "repeat": 4,
+      "baseline_tok_s": 14.31398076425056,
+      "v3_tok_s": 18.082568623554,
+      "baseline_ttft_ms": 86.4552993774414,
+      "v3_ttft_ms": 83.44070434570312,
+      "v3_itl_ms": 45.92226892710702,
+      "v3_peak_vram_mib": 2136.07958984375,
+      "token_match": true,
+      "text_match": true,
+      "native_v3_dispatches": 36,
+      "graph_replays": 3
+    },
+    {
+      "repeat": 5,
+      "baseline_tok_s": 14.897659149953586,
+      "v3_tok_s": 19.569809924345957,
+      "baseline_ttft_ms": 73.18726348876953,
+      "v3_ttft_ms": 75.86089324951172,
+      "v3_itl_ms": 42.84519110712184,
+      "v3_peak_vram_mib": 2136.07958984375,
+      "token_match": true,
+      "text_match": true,
+      "native_v3_dispatches": 36,
+      "graph_replays": 3
+    }
+  ],
+  "median": {
+    "paired_vanilla_baseline_tok_s": 14.897659149953586,
+    "v3_tok_s": 19.502940834532403,
+    "v3_vs_paired_vanilla_percent": 30.91362729047108,
+    "existing_graph_sidecar_tok_s": 21.20850404953157,
+    "v3_vs_existing_graph_percent": -8.04337464385441,
+    "v3_peak_vram_mib": 2136.07958984375,
+    "existing_graph_peak_vram_mib": 2135.62255859375,
+    "v3_peak_vram_delta_mib": 0.45703125
+  },
+  "promotion": {
+    "status": "not_promoted",
+    "reason": "Exact parity and zero ptxas spills passed, but v3 is 8.04% below the existing graph sidecar median and fails the >=5% promotion gate.",
+    "default_remains": "qwen2_gqa_decode_sm86_fp16_graph_v1",
+    "v3_remains": "opt_in_experimental"
+  },
+  "evidence": {
+    "sm86_artifact": "artifacts/sm86/kudacuda.dll",
+    "sm89_artifact": "artifacts/sm89/kudacuda.dll",
+    "native_smoke": "artifacts/sm86/kudacuda_nf4_tiled_gemv_smoke.exe",
+    "ptxas_audit": "build-sm86-nf4-ptxas-audit",
+    "v3_repeats": "results/qwen25-3b-sm86-nf4-gemv-v3-repeat-1.json",
+    "graph_baseline_reference": "results/qwen25-3b-sm86-nf4-tiled-gemv-final.json"
+  }
+}

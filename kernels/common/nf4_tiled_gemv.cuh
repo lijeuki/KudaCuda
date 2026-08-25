@@ -167,6 +167,116 @@ __global__ void nf4_tiled_qkv_gemv_kernel(
     }
 }
 
+constexpr int kNf4V3RowsPerBlock = 2;
+
+__global__ void nf4_tiled_qkv_gemv_v3_kernel(
+    const float* normalized,
+    const uint8_t* q_weight,
+    const float* q_absmax,
+    const __half* q_bias,
+    const uint8_t* k_weight,
+    const float* k_absmax,
+    const __half* k_bias,
+    const uint8_t* v_weight,
+    const float* v_absmax,
+    const __half* v_bias,
+    __half* q_output,
+    __half* k_output,
+    __half* v_output,
+    int64_t rows,
+    int64_t hidden,
+    int64_t q_out,
+    int64_t kv_out,
+    int64_t blocksize
+) {
+    const int64_t output_block = static_cast<int64_t>(blockIdx.x);
+    const int64_t row = static_cast<int64_t>(blockIdx.y);
+    const int tid = threadIdx.x;
+    const int64_t q_blocks = (q_out + kNf4V3RowsPerBlock - 1) / kNf4V3RowsPerBlock;
+    const int64_t kv_blocks = (kv_out + kNf4V3RowsPerBlock - 1) / kNf4V3RowsPerBlock;
+    if (row >= rows || output_block >= q_blocks + kv_blocks || hidden != 2048 || blocksize != 64) {
+        return;
+    }
+
+    __shared__ float normalized_tile[2048];
+    const float4* normalized_source = reinterpret_cast<const float4*>(normalized + row * hidden);
+    float4* normalized_destination = reinterpret_cast<float4*>(normalized_tile);
+    for (int index = tid; index < hidden / 4; index += kNf4TiledThreads) {
+        normalized_destination[index] = normalized_source[index];
+    }
+    __syncthreads();
+
+    const bool is_kv = output_block >= q_blocks;
+    const int64_t group_block = is_kv ? output_block - q_blocks : output_block;
+    const int64_t output_base = group_block * kNf4V3RowsPerBlock;
+    const int64_t output_limit = is_kv ? kv_out : q_out;
+    float key_sums[kNf4V3RowsPerBlock] = {0.0F, 0.0F};
+    float value_sums[kNf4V3RowsPerBlock] = {0.0F, 0.0F};
+
+#pragma unroll
+    for (int output_offset = 0; output_offset < kNf4V3RowsPerBlock; ++output_offset) {
+        const int64_t output_index = output_base + output_offset;
+        if (output_index < output_limit) {
+            if (!is_kv) {
+                const uint4 packed = reinterpret_cast<const uint4*>(q_weight + output_index * (hidden / 2))[tid];
+                key_sums[output_offset] = nf4_dot_uint4(
+                    packed, output_index, hidden, normalized_tile, q_absmax, blocksize
+                );
+            } else {
+                const uint4 packed_key = reinterpret_cast<const uint4*>(k_weight + output_index * (hidden / 2))[tid];
+                const uint4 packed_value = reinterpret_cast<const uint4*>(v_weight + output_index * (hidden / 2))[tid];
+                key_sums[output_offset] = nf4_dot_uint4(
+                    packed_key, output_index, hidden, normalized_tile, k_absmax, blocksize
+                );
+                value_sums[output_offset] = nf4_dot_uint4(
+                    packed_value, output_index, hidden, normalized_tile, v_absmax, blocksize
+                );
+            }
+        }
+    }
+
+    __shared__ float key_warp_sums[kNf4V3RowsPerBlock][kNf4TiledThreads / 32];
+    __shared__ float value_warp_sums[kNf4V3RowsPerBlock][kNf4TiledThreads / 32];
+#pragma unroll
+    for (int output_offset = 0; output_offset < kNf4V3RowsPerBlock; ++output_offset) {
+        key_sums[output_offset] = nf4_warp_sum(key_sums[output_offset]);
+        value_sums[output_offset] = nf4_warp_sum(value_sums[output_offset]);
+        if ((tid & 31) == 0) {
+            key_warp_sums[output_offset][tid >> 5] = key_sums[output_offset];
+            value_warp_sums[output_offset][tid >> 5] = value_sums[output_offset];
+        }
+    }
+    __syncthreads();
+    if (tid < 32) {
+#pragma unroll
+        for (int output_offset = 0; output_offset < kNf4V3RowsPerBlock; ++output_offset) {
+            key_sums[output_offset] = nf4_warp_sum(
+                tid < (kNf4TiledThreads / 32) ? key_warp_sums[output_offset][tid] : 0.0F
+            );
+            value_sums[output_offset] = nf4_warp_sum(
+                tid < (kNf4TiledThreads / 32) ? value_warp_sums[output_offset][tid] : 0.0F
+            );
+        }
+    }
+    if (tid == 0) {
+#pragma unroll
+        for (int output_offset = 0; output_offset < kNf4V3RowsPerBlock; ++output_offset) {
+            const int64_t output_index = output_base + output_offset;
+            if (output_index < output_limit) {
+                if (!is_kv) {
+                    q_output[row * q_out + output_index] =
+                        __float2half(key_sums[output_offset] + __half2float(q_bias[output_index]));
+                } else {
+                    k_output[row * kv_out + output_index] =
+                        __float2half(key_sums[output_offset] + __half2float(k_bias[output_index]));
+                    v_output[row * kv_out + output_index] =
+                        __float2half(value_sums[output_offset] + __half2float(v_bias[output_index]));
+                }
+            }
+        }
+    }
+}
+
 inline cudaError_t launch_nf4_tiled_rmsnorm_qkv(
     const __half* input,
     const __half* norm_weight,
@@ -202,6 +312,70 @@ inline cudaError_t launch_nf4_tiled_rmsnorm_qkv(
         return status;
     }
     nf4_tiled_qkv_gemv_kernel<<<dim3(static_cast<unsigned int>(q_out + kv_out), static_cast<unsigned int>(rows)), kNf4TiledThreads, 0, stream>>>(
+        normalized,
+        q_weight,
+        q_absmax,
+        q_bias,
+        k_weight,
+        k_absmax,
+        k_bias,
+        v_weight,
+        v_absmax,
+        v_bias,
+        q_output,
+        k_output,
+        v_output,
+        rows,
+        hidden,
+        q_out,
+        kv_out,
+        blocksize
+    );
+    return cudaGetLastError();
+}
+
+inline cudaError_t launch_nf4_tiled_rmsnorm_qkv_v3(
+    const __half* input,
+    const __half* norm_weight,
+    const uint8_t* q_weight,
+    const float* q_absmax,
+    const __half* q_bias,
+    const uint8_t* k_weight,
+    const float* k_absmax,
+    const __half* k_bias,
+    const uint8_t* v_weight,
+    const float* v_absmax,
+    const __half* v_bias,
+    float* normalized,
+    __half* q_output,
+    __half* k_output,
+    __half* v_output,
+    int64_t rows,
+    int64_t hidden,
+    int64_t q_out,
+    int64_t kv_out,
+    int64_t blocksize,
+    float epsilon,
+    cudaStream_t stream
+) {
+    if (rows != 1 || hidden != 2048 || q_out != 2048 || kv_out != 256 || blocksize != 64 || epsilon <= 0.0F) {
+        return cudaErrorInvalidValue;
+    }
+    nf4_tiled_rmsnorm_kernel<<<static_cast<unsigned int>(rows), kNf4TiledThreads, 0, stream>>>(
+        input, norm_weight, normalized, rows, hidden, epsilon
+    );
+    auto status = cudaGetLastError();
+    if (status != cudaSuccess) {
+        return status;
+    }
+    const int64_t q_blocks = (q_out + kNf4V3RowsPerBlock - 1) / kNf4V3RowsPerBlock;
+    const int64_t kv_blocks = (kv_out + kNf4V3RowsPerBlock - 1) / kNf4V3RowsPerBlock;
+    nf4_tiled_qkv_gemv_v3_kernel<<<
+        dim3(static_cast<unsigned int>(q_blocks + kv_blocks), static_cast<unsigned int>(rows)),
+        kNf4TiledThreads,
+        0,
+        stream
+    >>>(
         normalized,
         q_weight,
         q_absmax,
