@@ -19,7 +19,7 @@ Stable C ABI + caller CUDA stream
 Target-specific CUDA kernel
 ```
 
-The native pilot paths are `vector_add`, FP32 `rmsnorm`, decode-only Qwen2 grouped-query attention, an opt-in NF4 fused RMSNorm-QKV projection, and an opt-in fixed-workspace GQA tactic. Qwen2.5-3B attention is active only for the exact batch-1/query-1/FP16 profile; prefill, unsupported masks, Gemma/Llama attention, and all other misses use the original Transformers implementation.
+The native pilot paths are `vector_add`, FP32 `rmsnorm`, decode-only Qwen2 grouped-query attention, an opt-in NF4 fused RMSNorm-QKV projection, an opt-in tiled NF4 GEMV projection, and an opt-in fixed-workspace GQA tactic. Qwen2.5-3B attention is active only for the exact batch-1/query-1/FP16 profile; prefill, unsupported masks, Gemma/Llama attention, and all other misses use the original Transformers implementation.
 
 The Netra-parity expansion adds a cached CUDA module registry, graph capture/replay, an RMSNorm pilot kernel, independent output comparison, benchmark/profiling entry points, target capability manifests, and a kernel-promotion evidence format. See [architecture-portability.md](docs/architecture-portability.md) and [kernel-lifecycle.md](docs/kernel-lifecycle.md).
 
@@ -85,12 +85,13 @@ Run date: 2026-08-25. Hardware: NVIDIA GeForce RTX 3050 Laptop GPU, 4,095.5 MiB 
 
 | Check | Result | Evidence |
 |---|---|---|
-| Python contract/tooling suite | 40/40 passed | `python -m unittest discover -s tests -p 'test_*.py'` |
+| Python contract/tooling suite | 42/42 passed | `python -m pytest -q` |
 | Python compilation | Passed | `python -m py_compile` over all tracked Python files |
 | Vector-add native smoke | Passed; non-default stream and CUDA Graph replay | `artifacts/sm86/kudacuda_vector_add_smoke.exe` |
 | RMSNorm native smoke | Passed against independent FP64 reference | `artifacts/sm86/kudacuda_rmsnorm_smoke.exe` |
 | Fused RMSNorm-QKV native smoke | Passed against independent FP32 reference | `artifacts/sm86/kudacuda_rmsnorm_qkv_smoke.exe` |
 | NF4 fused RMSNorm-QKV native smoke | Passed with bitsandbytes nibble order and bias-aware ABI | `artifacts/sm86/kudacuda_nf4_fused_qkv_smoke.exe` |
+| Tiled NF4 GEMV native smoke | Passed against an independent FP32 reference; constant codebook, `uint4` loads, and bias epilogue | `artifacts/sm86/kudacuda_nf4_tiled_gemv_smoke.exe` |
 | Workspace GQA native smoke | Passed for KV lengths 1, 7, 64, 128, 512 | `artifacts/sm86/kudacuda_qwen2_gqa_workspace_smoke.exe` |
 | RMSNorm PyTorch harness | Validated; max absolute error `5.004e-7` | [rmsnorm-sm86-final.json](results/rmsnorm-sm86-final.json) |
 | Vector-add PyTorch harness | Validated exactly; 0.0722 ms average GPU event time | [vector-add-sm86-final.json](results/vector-add-sm86-final.json) |
@@ -158,7 +159,20 @@ The fused path was tested against the real D-drive Qwen2.5-3B NF4 checkpoint. Pr
 | NF4 fused QKV + static graph | 67.42 ms | 236.30 ms | 5.153 tok/s | 2,135.8 MiB | 36 fused QKV + 36 GQA | Exact |
 | Workspace GQA static graph | 71.27 ms | 48.94 ms | 18.340 tok/s | 2,135.7 MiB | 36 workspace GQA | Exact |
 
-Evidence: [NF4 fused QKV run](results/qwen25-3b-sm86-nf4-fused-qkv.json), [five-run NF4 repeat 1](results/qwen25-3b-sm86-nf4-fused-qkv-repeat-1.json), and [workspace GQA run](results/qwen25-3b-sm86-workspace-gqa.json). The five-run NF4 median was 5.126 tok/s versus 15.358 tok/s for the paired baseline, with exact parity in all five runs. The workspace row's paired baseline was 15.543 tok/s. Both tactics remain experimental and opt-in; the existing graph tactic remains the better local path. The next optimization is a tiled NF4 GEMV with bias epilogue, not promotion of the current correctness-first kernel.
+Evidence: [NF4 fused QKV run](results/qwen25-3b-sm86-nf4-fused-qkv.json), [five-run NF4 repeat 1](results/qwen25-3b-sm86-nf4-fused-qkv-repeat-1.json), and [workspace GQA run](results/qwen25-3b-sm86-workspace-gqa.json). The five-run NF4 median was 5.126 tok/s versus 15.358 tok/s for the paired baseline, with exact parity in all five runs. The workspace row's paired baseline was 15.543 tok/s. Both tactics remain experimental and opt-in; the existing graph tactic remains the better local path.
+
+#### Tiled NF4 GEMV v2
+
+The v2 path adds a versioned ABI and an opt-in `--tiled-nf4-gemv` hook for the exact Qwen2.5-3B NF4 decode contract. It stages RMSNorm into a stable FP32 workspace, uses a 64-thread one-output-row GEMV with 128-bit `uint4` packed-weight loads, a constant-memory 16-entry NF4 codebook, FP32 accumulation, blocksize-64 scales, and a fused bias epilogue. The sm86 `ptxas` audit reports 56 registers, zero spill stores/loads, 16 bytes of shared memory for GEMV, and 25 registers/zero spills for RMSNorm. The same source builds for sm89; runtime evidence is still required on an L40S.
+
+Five paired four-token graph runs on the RTX 3050 produced:
+
+| Mode | Median TTFT | Median ITL | Median throughput | Median peak VRAM | Output parity |
+|---|---:|---:|---:|---:|---|
+| Existing graph sidecar | 74.31 ms | 38.88 ms | 21.209 tok/s | 2,135.6 MiB | Exact |
+| Tiled NF4 GEMV v2 | 70.85 ms | 43.83 ms | 19.382 tok/s | 2,136.1 MiB | Exact; 36 native v2 dispatches |
+
+The v2 median is 8.61% slower than the existing graph sidecar, so it fails the 5% promotion gate and remains opt-in. It is nevertheless a substantial improvement over v1 fused QKV (~5.1 tok/s under the same graph harness). Evidence: [tiled GEMV aggregate](results/qwen25-3b-sm86-nf4-tiled-gemv-final.json), the five [baseline runs](results/qwen25-3b-sm86-nf4-baseline-repeat-1.json), and the five [tiled runs](results/qwen25-3b-sm86-nf4-tiled-gemv-repeat-1.json).
 
 ### Attention optimization experiments
 
@@ -172,7 +186,7 @@ The production default remains the per-query-head `qwen2_gqa_decode_sm86_fp16` t
 
 The group-tiled kernel reuses KV tiles across query heads, but its current two-KV-group grid underutilizes the RTX 3050 at long KV lengths. The vectorized kernel preserves query-head parallelism and is closer, but still loses to the existing baseline. See the [group-tiled microbenchmark](results/qwen2-gqa-sm86-group-tiled-microbenchmark.json), [vectorized microbenchmark](results/qwen2-gqa-sm86-vectorized-microbenchmark.json), [group-tiled model run](results/qwen25-3b-sm86-group-tiled-model-final.json), and [vectorized model run](results/qwen25-3b-sm86-vectorized-model.json).
 
-The NF4 fused RMSNorm-QKV and workspace GQA kernels are validated and integrated as opt-in experimental paths. They are not the default because the measured fused projection path regressed throughput and the workspace GQA path is slower than the existing graph tactic. The static decode graph remains the best verified KudaCuda path; none of these experiments yet cover Gemma, BF16, batching, or paged KV.
+The NF4 fused RMSNorm-QKV, tiled NF4 GEMV, and workspace GQA kernels are validated and integrated as opt-in experimental paths. They are not the default because each measured projection/workspace variant regressed against the existing graph tactic. The static decode graph remains the best verified KudaCuda path; none of these experiments yet cover Gemma, BF16, batching, or paged KV.
 
 ## Validation
 

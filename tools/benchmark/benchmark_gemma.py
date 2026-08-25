@@ -373,6 +373,7 @@ def _install_attention_patch(
     *,
     qwen_tactic: str | None = None,
     fused_qkv: bool = False,
+    tiled_nf4_gemv: bool = False,
 ) -> tuple[Callable[[], None], str]:
     """Patch the model's concrete attention class with its exact tactic contract."""
 
@@ -384,10 +385,12 @@ def _install_attention_patch(
             "preferred_qwen_tactic",
             f"qwen2_gqa_decode_{arch}_fp16",
         )
-        if fused_qkv:
+        if fused_qkv or tiled_nf4_gemv:
             fused_tactic = bridge.manifest.get(
-                "preferred_qwen_fused_qkv_tactic",
-                f"qwen2_fused_rmsnorm_qkv_{arch}_nf4_v1",
+                "preferred_qwen_tiled_nf4_gemv_tactic"
+                if tiled_nf4_gemv
+                else "preferred_qwen_fused_qkv_tactic",
+                f"qwen2_fused_rmsnorm_qkv_{arch}_nf4_{'v2' if tiled_nf4_gemv else 'v1'}",
             )
             return (
                 patch_qwen2_fused_qkv(
@@ -447,6 +450,11 @@ def main(argv: list[str] | None = None) -> int:
         "--fused-qkv",
         action="store_true",
         help="Opt into the experimental Qwen2 NF4 fused RMSNorm-QKV decoder hook.",
+    )
+    parser.add_argument(
+        "--tiled-nf4-gemv",
+        action="store_true",
+        help="Opt into the experimental tiled NF4 GEMV Qwen2 fused RMSNorm-QKV hook.",
     )
     parser.add_argument("--graph-decode", action="store_true")
     parser.add_argument("--graph-kv-bucket", type=int, default=512)
@@ -550,7 +558,8 @@ def main(argv: list[str] | None = None) -> int:
             unpatch, tactic_name = _install_attention_patch(
                 model,
                 bridge,
-                fused_qkv=args.fused_qkv,
+                fused_qkv=args.fused_qkv or args.tiled_nf4_gemv,
+                tiled_nf4_gemv=args.tiled_nf4_gemv,
                 qwen_tactic=(
                     args.qwen_tactic
                     or (
@@ -594,7 +603,8 @@ def main(argv: list[str] | None = None) -> int:
                     unpatch, tactic_name = _install_attention_patch(
                         model,
                         bridge,
-                        fused_qkv=args.fused_qkv,
+                        fused_qkv=args.fused_qkv or args.tiled_nf4_gemv,
+                        tiled_nf4_gemv=args.tiled_nf4_gemv,
                         qwen_tactic=f"qwen2_gqa_decode_{str(bridge.manifest.get('target_arch', 'sm_86')).replace('sm_', 'sm')}_fp16",
                     )
                     generation = run_generation(
@@ -618,6 +628,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             native_dispatches = int(getattr(bridge, "native_attention_dispatches", 0))
             native_fused_qkv_dispatches = int(getattr(bridge, "native_fused_qkv_dispatches", 0))
+            native_fused_qkv_v2_dispatches = int(getattr(bridge, "native_fused_qkv_v2_dispatches", 0))
             fused_qkv_hook_calls = int(getattr(bridge, "native_fused_qkv_hook_calls", 0))
             dispatch_reason = getattr(bridge, "last_qwen2_dispatch_reason", None)
             fused_dispatch_reason = getattr(bridge, "last_qwen2_fused_qkv_dispatch_reason", None)
@@ -626,7 +637,7 @@ def main(argv: list[str] | None = None) -> int:
                 if dispatcher
                 and tactic_status in {"implemented", "experimental"}
                 and native_dispatches > 0
-                and (not args.fused_qkv or native_fused_qkv_dispatches > 0)
+                and (not (args.fused_qkv or args.tiled_nf4_gemv) or native_fused_qkv_dispatches > 0)
                 else "fallback-only"
             )
             payload["sidecar"] = {
@@ -636,14 +647,18 @@ def main(argv: list[str] | None = None) -> int:
                 "native_attention_dispatcher": dispatcher,
                 "native_attention_dispatches": native_dispatches,
                 "native_fused_qkv_dispatches": native_fused_qkv_dispatches,
+                "native_fused_qkv_v2_dispatches": native_fused_qkv_v2_dispatches,
                 "fused_qkv_hook_calls": fused_qkv_hook_calls,
                 "last_qwen2_dispatch_reason": dispatch_reason,
                 "last_qwen2_fused_qkv_dispatch_reason": fused_dispatch_reason,
-                "fused_qkv_requested": bool(args.fused_qkv),
+                "fused_qkv_requested": bool(args.fused_qkv or args.tiled_nf4_gemv),
+                "tiled_nf4_gemv_requested": bool(args.tiled_nf4_gemv),
                 "fused_qkv_tactic": bridge.manifest.get(
-                    "preferred_qwen_fused_qkv_tactic",
-                    f"qwen2_fused_rmsnorm_qkv_{str(bridge.manifest.get('target_arch', 'sm_86')).replace('sm_', 'sm')}_nf4_v1",
-                ) if args.fused_qkv else None,
+                    "preferred_qwen_tiled_nf4_gemv_tactic"
+                    if args.tiled_nf4_gemv
+                    else "preferred_qwen_fused_qkv_tactic",
+                    f"qwen2_fused_rmsnorm_qkv_{str(bridge.manifest.get('target_arch', 'sm_86')).replace('sm_', 'sm')}_nf4_{'v2' if args.tiled_nf4_gemv else 'v1'}",
+                ) if (args.fused_qkv or args.tiled_nf4_gemv) else None,
                 "allocated_after_load_mib": allocated_after_load,
                 **generation,
             }

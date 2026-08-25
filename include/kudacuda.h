@@ -85,6 +85,32 @@ KUDACUDA_API int kudacuda_qwen2_fused_rmsnorm_qkv_nf4(
     uint64_t stream
 );
 
+KUDACUDA_API int kudacuda_qwen2_fused_rmsnorm_qkv_nf4_v2(
+    void* handle,
+    uint64_t input,
+    uint64_t norm_weight,
+    uint64_t q_weight_packed,
+    uint64_t q_absmax,
+    uint64_t q_bias,
+    uint64_t k_weight_packed,
+    uint64_t k_absmax,
+    uint64_t k_bias,
+    uint64_t v_weight_packed,
+    uint64_t v_absmax,
+    uint64_t v_bias,
+    uint64_t normalized_workspace,
+    uint64_t q_output,
+    uint64_t k_output,
+    uint64_t v_output,
+    int64_t rows,
+    int64_t hidden,
+    int64_t q_out,
+    int64_t kv_out,
+    int64_t blocksize,
+    float epsilon,
+    uint64_t stream
+);
+
 KUDACUDA_API int kudacuda_qwen2_gqa_decode_workspace_v3(
     void* handle,
     uint64_t query,

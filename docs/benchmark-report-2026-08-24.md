@@ -78,14 +78,28 @@ Both variants passed KV lengths 1, 7, 128, and 512 with maximum absolute error `
 
 The fused RMSNorm-QKV smoke validates the FP16 dense-weight foundation. It is not yet connected to Qwen2's production NF4/int4 projection weights. The graph implementation now captures and replays the fixed-shape Qwen2 decode path with exact parity; Gemma, BF16, batching, paged KV, and quantized projection fusion remain unsupported.
 
+### Tiled NF4 GEMV v2 — 2026-08-25
+
+The next NF4 experiment targets the real Qwen2.5-3B 4-bit decode path on the RTX 3050. It adds a versioned native ABI, a stable FP32 RMSNorm workspace, a 64-thread one-output-row GEMV, 128-bit `uint4` weight loads, a constant-memory NF4 codebook, FP32 reduction, blocksize-64 scales, and a fused bias epilogue. The sm86 `ptxas` audit reports 56 registers and zero spill stores/loads for the GEMV kernel, 16 bytes of shared memory, and 25 registers/zero spills for RMSNorm. The same source compiles for sm89; no L40S runtime was available.
+
+Five paired four-token graph runs used the same D-drive checkpoint, prompt, 512-token graph bucket, and `--load-in-4bit` configuration:
+
+| Mode | Median TTFT | Median ITL | Median throughput | Median peak VRAM | Dispatch/parity |
+|---|---:|---:|---:|---:|---|
+| Existing graph sidecar | 74.31 ms | 38.88 ms | 21.209 tok/s | 2,135.6 MiB | Exact |
+| Tiled NF4 GEMV v2 | 70.85 ms | 43.83 ms | 19.382 tok/s | 2,136.1 MiB | 36 v2 dispatches; exact |
+
+The v2 result is 8.61% below the existing graph sidecar, so it fails the 5% promotion gate and remains opt-in. It is substantially faster than the earlier v1 fused-QKV graph path (~5.1 tok/s), but the one-output-row NF4 GEMV still does not beat the framework's optimized quantized projection path. Evidence: [aggregate result](../results/qwen25-3b-sm86-nf4-tiled-gemv-final.json), [baseline repeat 1](../results/qwen25-3b-sm86-nf4-baseline-repeat-1.json), and [tiled repeat 1](../results/qwen25-3b-sm86-nf4-tiled-gemv-repeat-1.json).
+
 ## Full verification matrix
 
-- Python contract/tooling suite: 30/30 passed.
+- Python contract/tooling suite: 42/42 passed with `pytest`.
 - Python compilation: passed for all tracked Python files.
 - Native vector-add smoke: passed with a caller-owned non-default stream and CUDA Graph replay.
 - Native RMSNorm smoke: passed against an independent FP64 reference.
 - Native Qwen2 GQA smoke: passed against an independent FP32 reference.
 - Native fused RMSNorm-QKV smoke: passed against an independent FP32 reference.
+- Native tiled NF4 GEMV smoke: passed against an independent FP32 reference; sm86 and sm89 targets compile.
 - Native CUDA Graph multi-launch smoke: passed against an independent reference.
 - Qwen2 static decode CUDA Graph: captured/replayed with exact token/text parity; 36 native attention dispatches were recorded during capture.
 - Experimental Qwen2 GQA variants: correctness passed; group-tiled and vectorized tactics were not promoted after direct-event comparison.

@@ -46,6 +46,9 @@ class FakeNative:
         self.kudacuda_qwen2_fused_rmsnorm_qkv_nf4 = FakeNativeFunction(
             self._qwen2_fused_rmsnorm_qkv_nf4
         )
+        self.kudacuda_qwen2_fused_rmsnorm_qkv_nf4_v2 = FakeNativeFunction(
+            self._qwen2_fused_rmsnorm_qkv_nf4_v2
+        )
         self.kudacuda_qwen2_gqa_decode = FakeNativeFunction(self._qwen2_gqa_decode)
         self.kudacuda_qwen2_gqa_decode_group_tiled = FakeNativeFunction(
             self._qwen2_gqa_decode_group_tiled
@@ -105,6 +108,10 @@ class FakeNative:
 
     def _qwen2_fused_rmsnorm_qkv_nf4(self, *args):
         self.calls.append(("qwen2_fused_rmsnorm_qkv_nf4", *args))
+        return 0
+
+    def _qwen2_fused_rmsnorm_qkv_nf4_v2(self, *args):
+        self.calls.append(("qwen2_fused_rmsnorm_qkv_nf4_v2", *args))
         return 0
 
     def _qwen2_gqa_decode(
@@ -206,6 +213,12 @@ def nf4_manifest():
     manifest = qwen_manifest()
     tactic = "qwen2_fused_rmsnorm_qkv_sm86_nf4_v1"
     manifest["implemented_tactics"].append(tactic)
+    return manifest
+
+
+def nf4_v2_manifest():
+    manifest = nf4_manifest()
+    manifest["experimental_tactics"] = ["qwen2_fused_rmsnorm_qkv_sm86_nf4_v2"]
     return manifest
 
 
@@ -491,6 +504,27 @@ class ContractTests(unittest.TestCase):
                 epsilon=1.0e-5,
                 stream_ptr=77,
             )
+
+    def test_qwen2_nf4_v2_bridge_passes_normalized_workspace_and_stream(self):
+        native = FakeNative()
+        bridge = make_bridge(native=native, manifest=nf4_v2_manifest())
+        bridge.dispatch_qwen2_fused_rmsnorm_qkv_nf4_v2(
+            *nf4_tensors(),
+            normalized_workspace=FakeTensor(dtype="float32", shape=(1, 2048), pointer=71),
+            epsilon=1.0e-5,
+            stream_ptr=77,
+        )
+
+        call = native.calls[-1]
+        self.assertEqual(call[0], "qwen2_fused_rmsnorm_qkv_nf4_v2")
+        self.assertEqual(
+            call[1:17],
+            (101, 11, 22, 31, 32, 33, 41, 42, 43, 51, 52, 53, 71, 61, 62, 63),
+        )
+        self.assertEqual(call[17:21], (1, 2048, 2048, 256))
+        self.assertEqual(call[21], 64)
+        self.assertAlmostEqual(call[22], 1.0e-5)
+        self.assertEqual(call[23], 77)
 
     def test_bridge_resets_native_graph_lifecycle(self):
         native = FakeNative()

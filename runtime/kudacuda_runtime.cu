@@ -64,6 +64,31 @@ extern "C" cudaError_t kudacuda_launch_nf4_fused_rmsnorm_qkv(
     cudaStream_t stream
 );
 
+extern "C" cudaError_t kudacuda_launch_nf4_tiled_rmsnorm_qkv(
+    const __half* input,
+    const __half* norm_weight,
+    const uint8_t* q_weight,
+    const float* q_absmax,
+    const __half* q_bias,
+    const uint8_t* k_weight,
+    const float* k_absmax,
+    const __half* k_bias,
+    const uint8_t* v_weight,
+    const float* v_absmax,
+    const __half* v_bias,
+    float* normalized,
+    __half* q_output,
+    __half* k_output,
+    __half* v_output,
+    int64_t rows,
+    int64_t hidden,
+    int64_t q_out,
+    int64_t kv_out,
+    int64_t blocksize,
+    float epsilon,
+    cudaStream_t stream
+);
+
 extern "C" cudaError_t kudacuda_launch_qwen2_gqa_decode_workspace_v3(
     const __half* query,
     const __half* key_cache,
@@ -449,6 +474,84 @@ int kudacuda_qwen2_fused_rmsnorm_qkv_nf4(
     );
     if (status != cudaSuccess) {
         handle->set_cuda_error("qwen2_fused_rmsnorm_qkv_nf4_kernel", status);
+        return 1;
+    }
+    handle->last_error.clear();
+    return 0;
+}
+
+int kudacuda_qwen2_fused_rmsnorm_qkv_nf4_v2(
+    void* raw_handle,
+    uint64_t input,
+    uint64_t norm_weight,
+    uint64_t q_weight_packed,
+    uint64_t q_absmax,
+    uint64_t q_bias,
+    uint64_t k_weight_packed,
+    uint64_t k_absmax,
+    uint64_t k_bias,
+    uint64_t v_weight_packed,
+    uint64_t v_absmax,
+    uint64_t v_bias,
+    uint64_t normalized_workspace,
+    uint64_t q_output,
+    uint64_t k_output,
+    uint64_t v_output,
+    int64_t rows,
+    int64_t hidden,
+    int64_t q_out,
+    int64_t kv_out,
+    int64_t blocksize,
+    float epsilon,
+    uint64_t stream
+) {
+    auto* handle = reinterpret_cast<kudacuda::Handle*>(raw_handle);
+    if (!kudacuda::is_valid_handle(handle)) {
+        return 1;
+    }
+    if (!handle->frozen) {
+        handle->set_error("kudacuda_qwen2_fused_rmsnorm_qkv_nf4_v2 called before kudacuda_freeze");
+        return 1;
+    }
+    if (input == 0 || norm_weight == 0 || q_weight_packed == 0 || q_absmax == 0 || q_bias == 0 ||
+        k_weight_packed == 0 || k_absmax == 0 || k_bias == 0 || v_weight_packed == 0 ||
+        v_absmax == 0 || v_bias == 0 || normalized_workspace == 0 || q_output == 0 ||
+        k_output == 0 || v_output == 0) {
+        handle->set_error("qwen2_fused_rmsnorm_qkv_nf4_v2 requires non-null device pointers");
+        return 1;
+    }
+    if (rows != 1 || hidden != 2048 || q_out != 2048 || kv_out != 256 || blocksize != 64 ||
+        !(epsilon > 0.0F)) {
+        handle->set_error("qwen2_fused_rmsnorm_qkv_nf4_v2 requires rows=1, hidden=2048, q_out=2048, kv_out=256, blocksize=64, and positive epsilon");
+        return 1;
+    }
+
+    const auto status = kudacuda::kudacuda_launch_nf4_tiled_rmsnorm_qkv(
+        reinterpret_cast<const __half*>(input),
+        reinterpret_cast<const __half*>(norm_weight),
+        reinterpret_cast<const uint8_t*>(q_weight_packed),
+        reinterpret_cast<const float*>(q_absmax),
+        reinterpret_cast<const __half*>(q_bias),
+        reinterpret_cast<const uint8_t*>(k_weight_packed),
+        reinterpret_cast<const float*>(k_absmax),
+        reinterpret_cast<const __half*>(k_bias),
+        reinterpret_cast<const uint8_t*>(v_weight_packed),
+        reinterpret_cast<const float*>(v_absmax),
+        reinterpret_cast<const __half*>(v_bias),
+        reinterpret_cast<float*>(normalized_workspace),
+        reinterpret_cast<__half*>(q_output),
+        reinterpret_cast<__half*>(k_output),
+        reinterpret_cast<__half*>(v_output),
+        rows,
+        hidden,
+        q_out,
+        kv_out,
+        blocksize,
+        epsilon,
+        reinterpret_cast<cudaStream_t>(stream)
+    );
+    if (status != cudaSuccess) {
+        handle->set_cuda_error("nf4_tiled_rmsnorm_qkv", status);
         return 1;
     }
     handle->last_error.clear();

@@ -1,0 +1,79 @@
+{
+  "status": "completed",
+  "experiment": "Qwen2.5-3B NF4 tiled GEMV v2 inside static CUDA Graph",
+  "date": "2026-08-25",
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 3050 Laptop GPU",
+    "vram_capacity_mib": 4095.5,
+    "cuda": "13.3",
+    "architecture": "sm_86"
+  },
+  "contract": {
+    "model": "Qwen2.5-3B-Instruct",
+    "quantization": "bitsandbytes NF4",
+    "blocksize": 64,
+    "dtype": "float16",
+    "rows": 1,
+    "hidden": 2048,
+    "q_out": 2048,
+    "kv_out": 256,
+    "graph_kv_bucket": 512,
+    "max_new_tokens": 4
+  },
+  "ptxas_sm86": {
+    "nf4_tiled_qkv_gemv_registers": 56,
+    "nf4_tiled_qkv_gemv_spill_stores_bytes": 0,
+    "nf4_tiled_qkv_gemv_spill_loads_bytes": 0,
+    "nf4_tiled_qkv_gemv_shared_memory_bytes": 16,
+    "nf4_tiled_rmsnorm_registers": 25,
+    "nf4_tiled_rmsnorm_spill_stores_bytes": 0,
+    "nf4_tiled_rmsnorm_spill_loads_bytes": 0,
+    "nf4_tiled_rmsnorm_shared_memory_bytes": 8
+  },
+  "runs": {
+    "existing_graph_sidecar": [
+      {"repeat": 1, "throughput_tok_s": 19.77925817441326, "ttft_ms": 84.77664184570312, "itl_ms": 39.1518039299602, "peak_vram_mib": 2135.62255859375, "parity": true},
+      {"repeat": 2, "throughput_tok_s": 21.93502857881813, "ttft_ms": 71.62550354003906, "itl_ms": 36.910407542124936, "peak_vram_mib": 2135.62255859375, "parity": true},
+      {"repeat": 3, "throughput_tok_s": 22.07428955972835, "ttft_ms": 64.56700897216797, "itl_ms": 38.87975859843815, "peak_vram_mib": 2135.62255859375, "parity": true},
+      {"repeat": 4, "throughput_tok_s": 21.20850404953157, "ttft_ms": 74.306396484375, "itl_ms": 38.099064469512086, "peak_vram_mib": 2135.62255859375, "parity": true},
+      {"repeat": 5, "throughput_tok_s": 20.4780632000146, "ttft_ms": 74.4719009399414, "itl_ms": 40.28635719034355, "peak_vram_mib": 2135.62255859375, "parity": true}
+    ],
+    "tiled_nf4_gemv_v2": [
+      {"repeat": 1, "throughput_tok_s": 18.155370750196074, "ttft_ms": 88.84435272216797, "itl_ms": 43.82537579120253, "peak_vram_mib": 2136.07958984375, "native_v2_dispatches": 36, "parity": true},
+      {"repeat": 2, "throughput_tok_s": 19.859776795440258, "ttft_ms": 64.35609436035156, "itl_ms": 45.68534612470345, "peak_vram_mib": 2136.07958984375, "native_v2_dispatches": 36, "parity": true},
+      {"repeat": 3, "throughput_tok_s": 20.515601350908494, "ttft_ms": 70.84989166259766, "itl_ms": 41.374558859524164, "peak_vram_mib": 2136.07958984375, "native_v2_dispatches": 36, "parity": true},
+      {"repeat": 4, "throughput_tok_s": 19.345993440267442, "ttft_ms": 76.85215759277344, "itl_ms": 43.30300002598475, "peak_vram_mib": 2136.07958984375, "native_v2_dispatches": 36, "parity": true},
+      {"repeat": 5, "throughput_tok_s": 19.382166617913658, "ttft_ms": 70.72716522216797, "itl_ms": 45.216037179615036, "peak_vram_mib": 2136.07958984375, "native_v2_dispatches": 36, "parity": true}
+    ]
+  },
+  "median": {
+    "existing_graph_sidecar_throughput_tok_s": 21.20850404953157,
+    "tiled_nf4_gemv_v2_throughput_tok_s": 19.382166617913658,
+    "existing_graph_sidecar_ttft_ms": 74.306396484375,
+    "tiled_nf4_gemv_v2_ttft_ms": 70.84989166259766,
+    "existing_graph_sidecar_itl_ms": 38.87975859843815,
+    "tiled_nf4_gemv_v2_itl_ms": 43.82537579120253,
+    "existing_graph_sidecar_peak_vram_mib": 2135.62255859375,
+    "tiled_nf4_gemv_v2_peak_vram_mib": 2136.07958984375
+  },
+  "delta": {
+    "throughput_percent": -8.61134489897345,
+    "peak_vram_mib": 0.45703125
+  },
+  "parity": {
+    "baseline_all_runs_exact": true,
+    "tiled_all_runs_exact": true
+  },
+  "promotion": {
+    "status": "not_promoted",
+    "reason": "Median throughput is below the existing graph sidecar and fails the >=5% no-regression gate.",
+    "default_remains": "qwen2_gqa_decode_sm86_fp16_graph_v1"
+  },
+  "evidence": {
+    "sm86_artifact": "artifacts/sm86/kudacuda.dll",
+    "sm89_artifact": "artifacts/sm89/kudacuda.dll",
+    "native_smoke": "artifacts/sm86/kudacuda_nf4_tiled_gemv_smoke.exe",
+    "baseline_repeat_1": "results/qwen25-3b-sm86-nf4-baseline-repeat-1.json",
+    "tiled_repeat_1": "results/qwen25-3b-sm86-nf4-tiled-gemv-repeat-1.json"
+  }
+}

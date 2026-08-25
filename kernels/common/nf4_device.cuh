@@ -7,7 +7,7 @@
 namespace kudacuda {
 
 // bitsandbytes' canonical NF4 codebook (0.50.x).
-__device__ __constant__ float kNf4Codebook[16] = {
+static __device__ __constant__ float kNf4Codebook[16] = {
     -1.0F,
     -0.6961928009986877F,
     -0.5250730514526367F,
