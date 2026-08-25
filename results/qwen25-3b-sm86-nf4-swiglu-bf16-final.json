@@ -1,0 +1,65 @@
+{
+  "benchmark": "qwen25-3b-sm86-nf4-swiglu-bf16",
+  "date": "2026-08-25",
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 3050 Laptop GPU",
+    "vram_mib": 4095.5,
+    "driver": "610.88",
+    "cuda": "13.3",
+    "target_arch": "sm_86"
+  },
+  "model": {
+    "path": "D:\\AI\\Models\\HuggingFace\\hub\\models--Qwen--Qwen2.5-3B-Instruct\\snapshots\\aa8e72537993ba99e69dfaafa59ed015b17504d1",
+    "dtype": "bfloat16",
+    "quantization": "NF4",
+    "hidden_size": 2048,
+    "intermediate_size": 11008,
+    "blocksize": 64,
+    "bias": false
+  },
+  "active": {
+    "mode": "static CUDA Graph + BF16 NF4 SwiGLU sidecar",
+    "runs": 5,
+    "throughput_tok_s": [12.3046501673, 12.0105993133, 12.5981939455, 12.3170622012, 11.7930369150],
+    "itl_ms": [86.1993708701, 84.3269444812, 82.7416557009, 84.8965971492, 86.6266337241],
+    "ttft_ms": [66.4822387695, 80.0583343506, 69.2808609009, 70.0629730225, 79.3032989502],
+    "peak_vram_mib": 2140.10009765625,
+    "median_throughput_tok_s": 12.3046501673,
+    "median_itl_ms": 84.8965971492,
+    "median_ttft_ms": 70.0629730225,
+    "native_swiglu_dispatches_per_run": 36,
+    "native_swiglu_bf16_dispatches_per_run": 36,
+    "parity_passes": 5,
+    "status": "partial-native"
+  },
+  "control": {
+    "mode": "static CUDA Graph without fused SwiGLU",
+    "runs": 5,
+    "throughput_tok_s": [18.5831853783, 17.1192823248, 17.7772537994, 16.9782280588, 15.6921695840],
+    "itl_ms": [47.2757003753, 52.2462918560, 50.7376028516, 52.9265510636, 51.6495281300],
+    "ttft_ms": [73.4212493896, 76.9157791138, 72.7938232422, 76.81619262695, 99.9556198120],
+    "peak_vram_mib": 2139.34423828125,
+    "median_throughput_tok_s": 17.1192823248,
+    "median_itl_ms": 51.6495281300,
+    "median_ttft_ms": 76.81619262695,
+    "native_swiglu_dispatches_per_run": 0,
+    "status": "fallback-only"
+  },
+  "comparison": {
+    "throughput_change_pct": -28.12,
+    "itl_change_pct": 64.37,
+    "peak_vram_change_mib": 0.756,
+    "promotion": "not_promoted",
+    "reason": "The BF16 native SwiGLU contract is correct and parity-safe, but the scalar NF4 projection is slower than the framework quantized path on this RTX 3050. Attention remains framework/SDPA in the BF16 profile."
+  },
+  "verification": {
+    "native_smoke": "passed",
+    "sm86_compile": "passed",
+    "sm89_compile": "passed",
+    "sm86_ptxas_registers": 48,
+    "sm86_ptxas_spill_stores": 0,
+    "sm86_ptxas_spill_loads": 0,
+    "sm86_ptxas_shared_memory_bytes": 8264,
+    "python_tests": "49 passed"
+  }
+}

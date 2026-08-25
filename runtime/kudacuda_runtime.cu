@@ -1,6 +1,7 @@
 #include "kudacuda.h"
 
 #include <cuda_runtime.h>
+#include <cuda_bf16.h>
 #include <cuda_fp16.h>
 
 #include <cstdint>
@@ -122,6 +123,22 @@ extern "C" cudaError_t kudacuda_launch_nf4_swiglu(
     const uint8_t* up_weight,
     const float* up_absmax,
     __half* output,
+    int64_t rows,
+    int64_t hidden,
+    int64_t intermediate,
+    int64_t blocksize,
+    float epsilon,
+    cudaStream_t stream
+);
+
+extern "C" cudaError_t kudacuda_launch_nf4_swiglu_bf16(
+    const __nv_bfloat16* input,
+    const __nv_bfloat16* norm_weight,
+    const uint8_t* gate_weight,
+    const float* gate_absmax,
+    const uint8_t* up_weight,
+    const float* up_absmax,
+    __nv_bfloat16* output,
     int64_t rows,
     int64_t hidden,
     int64_t intermediate,
@@ -730,6 +747,63 @@ int kudacuda_qwen2_swiglu_nf4(
         handle->set_cuda_error("nf4_swiglu", status);
         return 1;
     }
+    return 0;
+}
+
+int kudacuda_qwen2_swiglu_nf4_bf16(
+    void* raw_handle,
+    uint64_t input,
+    uint64_t norm_weight,
+    uint64_t gate_weight_packed,
+    uint64_t gate_absmax,
+    uint64_t up_weight_packed,
+    uint64_t up_absmax,
+    uint64_t output,
+    int64_t rows,
+    int64_t hidden,
+    int64_t intermediate,
+    int64_t blocksize,
+    float epsilon,
+    uint64_t stream
+) {
+    auto* handle = reinterpret_cast<kudacuda::Handle*>(raw_handle);
+    if (!kudacuda::is_valid_handle(handle)) {
+        return 1;
+    }
+    if (!handle->frozen) {
+        handle->set_error("kudacuda_qwen2_swiglu_nf4_bf16 called before kudacuda_freeze");
+        return 1;
+    }
+    if (input == 0 || norm_weight == 0 || gate_weight_packed == 0 || gate_absmax == 0 ||
+        up_weight_packed == 0 || up_absmax == 0 || output == 0) {
+        handle->set_error("qwen2_swiglu_nf4_bf16 requires non-null device pointers");
+        return 1;
+    }
+    if (rows != 1 || hidden != 2048 || intermediate != 11008 || blocksize != 64 || !(epsilon > 0.0F)) {
+        handle->set_error("qwen2_swiglu_nf4_bf16 requires rows=1, hidden=2048, intermediate=11008, blocksize=64, and positive epsilon");
+        return 1;
+    }
+
+    const auto status = kudacuda::kudacuda_launch_nf4_swiglu_bf16(
+        reinterpret_cast<const __nv_bfloat16*>(input),
+        reinterpret_cast<const __nv_bfloat16*>(norm_weight),
+        reinterpret_cast<const uint8_t*>(gate_weight_packed),
+        reinterpret_cast<const float*>(gate_absmax),
+        reinterpret_cast<const uint8_t*>(up_weight_packed),
+        reinterpret_cast<const float*>(up_absmax),
+        reinterpret_cast<__nv_bfloat16*>(output),
+        rows,
+        hidden,
+        intermediate,
+        blocksize,
+        epsilon,
+        reinterpret_cast<cudaStream_t>(stream)
+    );
+    if (status != cudaSuccess) {
+        handle->set_cuda_error("nf4_swiglu_bf16", status);
+        return 1;
+    }
+    handle->last_error.clear();
     return 0;
 }
 

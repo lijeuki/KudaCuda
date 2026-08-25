@@ -18,6 +18,7 @@ if("${CMAKE_CUDA_ARCHITECTURES}" MATCHES "89")
     set(KUDACUDA_NF4_QKV_SOURCE kernels/sm89/nf4_fused_rmsnorm_qkv_sm89.cu)
     set(KUDACUDA_NF4_TILED_QKV_SOURCE kernels/sm89/nf4_tiled_gemv_sm89.cu)
     set(KUDACUDA_NF4_SWIGLU_SOURCE kernels/sm89/nf4_swiglu_sm89.cu)
+    set(KUDACUDA_NF4_SWIGLU_BF16_SOURCE kernels/sm89/nf4_swiglu_bf16_sm89.cu)
     set(KUDACUDA_QWEN_SOURCE kernels/sm89/qwen2_gqa_decode_sm89.cu)
     set(KUDACUDA_QWEN_GRAPH_SOURCE kernels/sm89/qwen2_gqa_graph_sm89.cu)
     set(KUDACUDA_QWEN_GROUP_SOURCE kernels/sm89/qwen2_gqa_group_tiled_sm89.cu)
@@ -29,6 +30,7 @@ else()
     set(KUDACUDA_NF4_QKV_SOURCE kernels/sm86/nf4_fused_rmsnorm_qkv_sm86.cu)
     set(KUDACUDA_NF4_TILED_QKV_SOURCE kernels/sm86/nf4_tiled_gemv_sm86.cu)
     set(KUDACUDA_NF4_SWIGLU_SOURCE kernels/sm86/nf4_swiglu_sm86.cu)
+    set(KUDACUDA_NF4_SWIGLU_BF16_SOURCE kernels/sm86/nf4_swiglu_bf16_sm86.cu)
     set(KUDACUDA_QWEN_SOURCE kernels/sm86/qwen2_gqa_decode_sm86.cu)
     set(KUDACUDA_QWEN_GRAPH_SOURCE kernels/sm86/qwen2_gqa_graph_sm86.cu)
     set(KUDACUDA_QWEN_GROUP_SOURCE kernels/sm86/qwen2_gqa_group_tiled_sm86.cu)
@@ -43,6 +45,7 @@ add_library(kudacuda SHARED
     ${KUDACUDA_NF4_QKV_SOURCE}
     ${KUDACUDA_NF4_TILED_QKV_SOURCE}
     ${KUDACUDA_NF4_SWIGLU_SOURCE}
+    ${KUDACUDA_NF4_SWIGLU_BF16_SOURCE}
     ${KUDACUDA_QWEN_SOURCE}
     ${KUDACUDA_QWEN_GRAPH_SOURCE}
     ${KUDACUDA_QWEN_GROUP_SOURCE}
@@ -194,6 +197,21 @@ target_include_directories(kudacuda_nf4_swiglu_smoke
 target_link_libraries(kudacuda_nf4_swiglu_smoke PRIVATE kudacuda)
 
 set_target_properties(kudacuda_nf4_swiglu_smoke PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+)
+
+add_executable(kudacuda_nf4_swiglu_bf16_smoke
+    tests/nf4_swiglu_bf16_smoke.cu
+)
+
+target_include_directories(kudacuda_nf4_swiglu_bf16_smoke
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(kudacuda_nf4_swiglu_bf16_smoke PRIVATE kudacuda)
+
+set_target_properties(kudacuda_nf4_swiglu_bf16_smoke PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
 )
 

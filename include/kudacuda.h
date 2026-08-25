@@ -154,6 +154,23 @@ KUDACUDA_API int kudacuda_qwen2_swiglu_nf4(
     uint64_t stream
 );
 
+KUDACUDA_API int kudacuda_qwen2_swiglu_nf4_bf16(
+    void* handle,
+    uint64_t input,
+    uint64_t norm_weight,
+    uint64_t gate_weight_packed,
+    uint64_t gate_absmax,
+    uint64_t up_weight_packed,
+    uint64_t up_absmax,
+    uint64_t output,
+    int64_t rows,
+    int64_t hidden,
+    int64_t intermediate,
+    int64_t blocksize,
+    float epsilon,
+    uint64_t stream
+);
+
 KUDACUDA_API int kudacuda_qwen2_gqa_decode_workspace_v3(
     void* handle,
     uint64_t query,

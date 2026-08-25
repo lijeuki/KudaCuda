@@ -6,10 +6,11 @@
   "preferred_qwen_tiled_nf4_gemv_tactic": "qwen2_fused_rmsnorm_qkv_sm89_nf4_v2",
   "preferred_qwen_tiled_nf4_gemv_v3_tactic": "qwen2_fused_rmsnorm_qkv_sm89_nf4_v3",
   "preferred_qwen_swiglu_tactic": "qwen2_swiglu_sm89_nf4_v1",
+  "preferred_qwen_swiglu_bf16_tactic": "qwen2_swiglu_sm89_bf16_nf4_v1",
   "warp_size": 32,
   "shared_memory_kb": 100,
   "implemented_tactics": ["vector_add", "rmsnorm", "qwen2_gqa_decode_sm89_fp16"],
-  "experimental_tactics": ["qwen2_gqa_decode_sm89_fp16_group_tiled_v2", "qwen2_gqa_decode_sm89_fp16_vectorized_v2", "qwen2_gqa_decode_sm89_fp16_graph_v1", "qwen2_gqa_decode_sm89_fp16_workspace_v3", "qwen2_fused_rmsnorm_qkv_sm89_nf4_v1", "qwen2_fused_rmsnorm_qkv_sm89_nf4_v2", "qwen2_fused_rmsnorm_qkv_sm89_nf4_v3", "qwen2_swiglu_sm89_nf4_v1"],
+  "experimental_tactics": ["qwen2_gqa_decode_sm89_fp16_group_tiled_v2", "qwen2_gqa_decode_sm89_fp16_vectorized_v2", "qwen2_gqa_decode_sm89_fp16_graph_v1", "qwen2_gqa_decode_sm89_fp16_workspace_v3", "qwen2_fused_rmsnorm_qkv_sm89_nf4_v1", "qwen2_fused_rmsnorm_qkv_sm89_nf4_v2", "qwen2_fused_rmsnorm_qkv_sm89_nf4_v3", "qwen2_swiglu_sm89_nf4_v1", "qwen2_swiglu_sm89_bf16_nf4_v1"],
   "planned_tactics": ["gqa8_attn", "kv_cache", "quantization", "moe", "routing", "sampling"],
   "precision_support": ["float32", "float16", "bfloat16", "tf32", "fp8", "int8", "int4"],
   "contracts": {
@@ -127,6 +128,19 @@
       "blocksize": 64,
       "bias": false,
       "activation": "silu"
+    },
+    "qwen2_swiglu_sm89_bf16_nf4_v1": {
+      "dtype": "bfloat16",
+      "layout": "contiguous",
+      "batch_size": 1,
+      "query_len": 1,
+      "hidden_size": 2048,
+      "intermediate_size": 11008,
+      "quant_type": "nf4",
+      "blocksize": 64,
+      "bias": false,
+      "activation": "silu",
+      "accumulator_dtype": "float32"
     }
   }
 }

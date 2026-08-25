@@ -54,6 +54,7 @@ class FakeNative:
             self._qwen2_fused_rmsnorm_qkv_nf4_v3
         )
         self.kudacuda_qwen2_swiglu_nf4 = FakeNativeFunction(self._qwen2_swiglu_nf4)
+        self.kudacuda_qwen2_swiglu_nf4_bf16 = FakeNativeFunction(self._qwen2_swiglu_nf4_bf16)
         self.kudacuda_qwen2_gqa_decode = FakeNativeFunction(self._qwen2_gqa_decode)
         self.kudacuda_qwen2_gqa_decode_group_tiled = FakeNativeFunction(
             self._qwen2_gqa_decode_group_tiled
@@ -125,6 +126,10 @@ class FakeNative:
 
     def _qwen2_swiglu_nf4(self, *args):
         self.calls.append(("qwen2_swiglu_nf4", *args))
+        return 0
+
+    def _qwen2_swiglu_nf4_bf16(self, *args):
+        self.calls.append(("qwen2_swiglu_nf4_bf16", *args))
         return 0
 
     def _qwen2_gqa_decode(
@@ -268,6 +273,12 @@ def swiglu_manifest():
     return manifest
 
 
+def bf16_swiglu_manifest():
+    manifest = swiglu_manifest()
+    manifest["experimental_tactics"].append("qwen2_swiglu_sm86_bf16_nf4_v1")
+    return manifest
+
+
 def nf4_tensors(*, blocksize=64, nested=False):
     q_state = FakeQuantState(shape=(2048, 2048), blocksize=blocksize, nested=nested)
     kv_state = FakeQuantState(shape=(256, 2048), blocksize=blocksize, nested=nested)
@@ -304,16 +315,16 @@ def nf4_tensors(*, blocksize=64, nested=False):
     )
 
 
-def swiglu_tensors(*, blocksize=64, nested=False):
+def swiglu_tensors(*, blocksize=64, nested=False, dtype="float16"):
     state = FakeQuantState(shape=(11008, 2048), blocksize=blocksize, nested=nested)
     return (
-        FakeTensor(dtype="float16", shape=(1, 2048), pointer=111),
-        FakeTensor(dtype="float16", shape=(2048,), pointer=122),
+        FakeTensor(dtype=dtype, shape=(1, 2048), pointer=111),
+        FakeTensor(dtype=dtype, shape=(2048,), pointer=122),
         FakeTensor(dtype="uint8", shape=(11272192, 1), pointer=131, quant_state=state),
         FakeTensor(dtype="float32", shape=(352256,), pointer=132),
         FakeTensor(dtype="uint8", shape=(11272192, 1), pointer=141, quant_state=state),
         FakeTensor(dtype="float32", shape=(352256,), pointer=142),
-        FakeTensor(dtype="float16", shape=(1, 11008), pointer=151),
+        FakeTensor(dtype=dtype, shape=(1, 11008), pointer=151),
     )
 
 def make_bridge(native=None, manifest=None):
@@ -619,6 +630,28 @@ class ContractTests(unittest.TestCase):
         self.assertAlmostEqual(call[13], 1.0e-5)
         self.assertEqual(call[14], 77)
 
+    def test_qwen2_swiglu_bf16_bridge_requires_bf16_interface(self):
+        native = FakeNative()
+        bridge = make_bridge(native=native, manifest=bf16_swiglu_manifest())
+        with self.assertRaisesRegex(ValueError, "bfloat16"):
+            bridge.dispatch_qwen2_swiglu_nf4_bf16(
+                *swiglu_tensors(),
+                epsilon=1.0e-6,
+                stream_ptr=77,
+            )
+        bridge.dispatch_qwen2_swiglu_nf4_bf16(
+            *swiglu_tensors(dtype="bfloat16"),
+            epsilon=1.0e-6,
+            stream_ptr=77,
+        )
+
+        call = native.calls[-1]
+        self.assertEqual(call[0], "qwen2_swiglu_nf4_bf16")
+        self.assertEqual(call[1:9], (101, 111, 122, 131, 132, 141, 142, 151))
+        self.assertEqual(call[9:13], (1, 2048, 11008, 64))
+        self.assertAlmostEqual(call[13], 1.0e-6)
+        self.assertEqual(call[14], 77)
+
     def test_bridge_resets_native_graph_lifecycle(self):
         native = FakeNative()
         bridge = make_bridge(native=native)
@@ -739,8 +772,8 @@ class FakeProjection:
 
 
 class FakeNorm:
-    def __init__(self):
-        self.weight = FakeTensor(dtype="float16", shape=(2048,), pointer=72)
+    def __init__(self, dtype="float16"):
+        self.weight = FakeTensor(dtype=dtype, shape=(2048,), pointer=72)
         self.variance_epsilon = 1.0e-6
 
     def __call__(self, value):
@@ -807,10 +840,10 @@ class FakeSwiGluAttention:
 
 
 class FakeSwiGluLayer:
-    def __init__(self):
+    def __init__(self, dtype="float16"):
         self.input_layernorm = lambda value: value
         self.self_attn = FakeSwiGluAttention()
-        self.post_attention_layernorm = FakeNorm()
+        self.post_attention_layernorm = FakeNorm(dtype=dtype)
         self.mlp = FakeSwiGluMlp()
 
     def forward(self, hidden_states, *args, **kwargs):
@@ -818,8 +851,8 @@ class FakeSwiGluLayer:
 
 
 class FakeSwiGluModel:
-    def __init__(self):
-        self.model = SimpleNamespace(layers=[FakeSwiGluLayer()])
+    def __init__(self, dtype="float16"):
+        self.model = SimpleNamespace(layers=[FakeSwiGluLayer(dtype=dtype)])
         self.config = SimpleNamespace(model_type="qwen2")
 
 
@@ -831,6 +864,9 @@ class FakeSwiGluBridge:
     def dispatch_qwen2_swiglu_nf4(self, *args, **kwargs):
         self.calls.append((args, kwargs))
 
+    def dispatch_qwen2_swiglu_nf4_bf16(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+
 
 class FakeTorchCuda:
     def current_stream(self, device):
@@ -839,6 +875,7 @@ class FakeTorchCuda:
 
 class FakeTorchModule:
     float16 = "float16"
+    bfloat16 = "bfloat16"
     cuda = FakeTorchCuda()
 
     def empty(self, shape, *, device, dtype):
@@ -935,6 +972,27 @@ class AttentionPatchTests(unittest.TestCase):
         self.assertIs(layer.forward.__func__, original_layer_forward.__func__)
         self.assertIs(layer.mlp.forward.__func__, original_mlp_forward.__func__)
         self.assertFalse(hasattr(layer, "_kudacuda_swiglu_state"))
+
+    def test_qwen2_swiglu_patch_selects_bf16_dispatch_for_bf16_tactic(self):
+        model = FakeSwiGluModel(dtype="bfloat16")
+        bridge = FakeSwiGluBridge()
+
+        unpatch = patch_qwen2_swiglu(
+            model,
+            bridge,
+            tactic_name="qwen2_swiglu_sm86_bf16_nf4_v1",
+            prepare=True,
+            torch_module=FakeTorchModule(),
+        )
+        result = model.model.layers[0].forward(
+            FakeTensor(dtype="bfloat16", shape=(1, 1, 2048), pointer=111)
+        )
+
+        self.assertIsInstance(result, FakeTensor)
+        self.assertEqual(len(bridge.calls), 1)
+        self.assertEqual(bridge.last_swiglu_dispatch_reason, "native")
+        self.assertEqual(bridge.calls[0][1]["tactic_name"], "qwen2_swiglu_sm86_bf16_nf4_v1")
+        unpatch()
 
 
 if __name__ == "__main__":

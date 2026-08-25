@@ -223,6 +223,7 @@ class KudaCudaBridge:
         self.native_fused_qkv_v2_dispatches = 0
         self.native_fused_qkv_v3_dispatches = 0
         self.native_swiglu_dispatches = 0
+        self.native_swiglu_bf16_dispatches = 0
         self.native_swiglu_hook_calls = 0
         self._graph_kv_len_device: Any = None
         self._graph_kv_capacity: int | None = None
@@ -395,6 +396,15 @@ class KudaCudaBridge:
                 + [ctypes.c_float, ctypes.c_uint64]
             )
             self._qwen2_swiglu_nf4.restype = ctypes.c_int
+        self._qwen2_swiglu_nf4_bf16 = getattr(self.lib, "kudacuda_qwen2_swiglu_nf4_bf16", None)
+        if self._qwen2_swiglu_nf4_bf16 is not None:
+            self._qwen2_swiglu_nf4_bf16.argtypes = (
+                [ctypes.c_void_p]
+                + [ctypes.c_uint64] * 7
+                + [ctypes.c_int64] * 4
+                + [ctypes.c_float, ctypes.c_uint64]
+            )
+            self._qwen2_swiglu_nf4_bf16.restype = ctypes.c_int
         self.lib.kudacuda_begin_capture.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
         self.lib.kudacuda_begin_capture.restype = ctypes.c_int
         self.lib.kudacuda_end_capture.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
@@ -457,7 +467,10 @@ class KudaCudaBridge:
                 return "unavailable"
             if not tactic_name.endswith(("_v2", "_v3")) and self._qwen2_fused_rmsnorm_qkv_nf4 is None:
                 return "unavailable"
-        if tactic_name.startswith("qwen2_swiglu_") and self._qwen2_swiglu_nf4 is None:
+        if "_bf16_" in tactic_name and tactic_name.startswith("qwen2_swiglu_"):
+            if self._qwen2_swiglu_nf4_bf16 is None:
+                return "unavailable"
+        elif tactic_name.startswith("qwen2_swiglu_") and self._qwen2_swiglu_nf4 is None:
             return "unavailable"
         if tactic_name in self.implemented_tactics:
             return "implemented"
@@ -1240,6 +1253,78 @@ class KudaCudaBridge:
         self._raise_if_failed(status, tactic_name)
         self.native_swiglu_dispatches += 1
 
+    def dispatch_qwen2_swiglu_nf4_bf16(
+        self,
+        input_tensor: Any,
+        norm_weight: Any,
+        gate_weight: Any,
+        gate_absmax: Any,
+        up_weight: Any,
+        up_absmax: Any,
+        output: Any,
+        *,
+        epsilon: float = 1.0e-6,
+        stream_ptr: int,
+        tactic_name: str = "qwen2_swiglu_sm86_bf16_nf4_v1",
+    ) -> None:
+        """Launch the exact Qwen2.5-3B BF16/NF4 fused SwiGLU contract."""
+
+        if self._closed:
+            raise NativeCudaError("KudaCuda bridge is closed")
+        if self._qwen2_swiglu_nf4_bf16 is None:
+            raise NativeCudaError("native library does not export the BF16 NF4 SwiGLU ABI")
+        if tactic_name not in self.implemented_tactics and tactic_name not in self.experimental_tactics:
+            raise NativeCudaError(f"{tactic_name} is not enabled by this manifest")
+        if not self._tensor_contract_matches(input_tensor, dtype="bfloat16", rank=2):
+            raise ValueError("input must be contiguous CUDA bfloat16 rank-2")
+        if not self._tensor_contract_matches(norm_weight, dtype="bfloat16", rank=1):
+            raise ValueError("norm_weight must be contiguous CUDA bfloat16 rank-1")
+        input_shape = tuple(int(value) for value in input_tensor.shape)
+        norm_shape = tuple(int(value) for value in norm_weight.shape)
+        rows, hidden = input_shape
+        if input_shape != (1, 2048) or norm_shape != (2048,):
+            raise ValueError("BF16 NF4 SwiGLU requires input (1, 2048) and norm_weight (2048,)")
+        gate_blocksize = self._validate_nf4_weight(
+            gate_weight,
+            gate_absmax,
+            expected_shape=(11008, 2048),
+            label="gate_weight",
+        )
+        up_blocksize = self._validate_nf4_weight(
+            up_weight,
+            up_absmax,
+            expected_shape=(11008, 2048),
+            label="up_weight",
+        )
+        if gate_blocksize != 64 or up_blocksize != 64:
+            raise ValueError("BF16 NF4 SwiGLU block sizes must be 64")
+        if not self._tensor_contract_matches(output, dtype="bfloat16", rank=2):
+            raise ValueError("output must be contiguous CUDA bfloat16 rank-2")
+        if tuple(int(value) for value in output.shape) != (rows, 11008):
+            raise ValueError("output must have shape (1, 11008)")
+        if epsilon <= 0.0:
+            raise ValueError("epsilon must be positive")
+        native_args = [
+            self.engine_handle,
+            self._tensor_pointer(input_tensor, "input"),
+            self._tensor_pointer(norm_weight, "norm_weight"),
+            self._tensor_pointer(gate_weight, "gate_weight"),
+            self._tensor_pointer(gate_absmax, "gate_absmax"),
+            self._tensor_pointer(up_weight, "up_weight"),
+            self._tensor_pointer(up_absmax, "up_absmax"),
+            self._tensor_pointer(output, "output"),
+            rows,
+            hidden,
+            11008,
+            64,
+            float(epsilon),
+            _normalize_cuda_handle(stream_ptr),
+        ]
+        status = self._qwen2_swiglu_nf4_bf16(*native_args)
+        self._raise_if_failed(status, tactic_name)
+        self.native_swiglu_dispatches += 1
+        self.native_swiglu_bf16_dispatches += 1
+
     def dispatch_qwen2_fused_rmsnorm_qkv_nf4_v2(
         self,
         input_tensor: Any,
@@ -1552,6 +1637,11 @@ def patch_qwen2_swiglu(
     layers = list(layers)
     if not layers:
         raise ValueError("Qwen2 model does not expose decoder layers")
+    dispatch_swiglu = (
+        bridge.dispatch_qwen2_swiglu_nf4_bf16
+        if "_bf16_" in tactic_name
+        else bridge.dispatch_qwen2_swiglu_nf4
+    )
     marker = object()
     originals: list[tuple[Any, Any, Any]] = [
         (layer, layer.forward, getattr(layer, "_kudacuda_swiglu_state", marker))
@@ -1640,7 +1730,7 @@ def patch_qwen2_swiglu(
                     stream_ptr = int(runtime_torch.cuda.current_stream(input_tensor.device).cuda_stream)
                 else:
                     stream_ptr = int(torch_module.cuda.current_stream(input_tensor.device).cuda_stream)
-                bridge.dispatch_qwen2_swiglu_nf4(
+                dispatch_swiglu(
                     input_tensor,
                     _layer.post_attention_layernorm.weight,
                     gate_weight,

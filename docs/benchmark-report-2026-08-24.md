@@ -76,7 +76,7 @@ The existing per-query-head FP16 kernel remains the production default. Direct C
 
 Both variants passed KV lengths 1, 7, 128, and 512 with maximum absolute error `1.22e-4`. Group tiling improves reuse in principle, but the current two-KV-group grid does not provide enough parallel work on the RTX 3050 at long context. The vectorized variant retains the original query-head grid and is closer to the baseline, but is still slower. Neither tactic is promoted. Evidence: [group-tiled correctness](../results/qwen2-gqa-sm86-group-tiled-correctness.json), [group-tiled benchmark](../results/qwen2-gqa-sm86-group-tiled-microbenchmark.json), [vectorized correctness](../results/qwen2-gqa-sm86-vectorized-correctness.json), and [vectorized benchmark](../results/qwen2-gqa-sm86-vectorized-microbenchmark.json).
 
-The fused RMSNorm-QKV smoke validates the FP16 dense-weight foundation. It is not yet connected to Qwen2's production NF4/int4 projection weights. The graph implementation now captures and replays the fixed-shape Qwen2 decode path with exact parity; Gemma, BF16, batching, paged KV, and quantized projection fusion remain unsupported.
+The fused RMSNorm-QKV smoke validates the FP16 dense-weight foundation. It is not yet connected to Qwen2's production NF4/int4 projection weights. The graph implementation now captures and replays the fixed-shape Qwen2 decode path with exact parity; Gemma, BF16 native attention, batching, paged KV, and quantized projection fusion remain unsupported.
 
 ### Tiled NF4 GEMV v2 — 2026-08-25
 
@@ -123,18 +123,34 @@ Five four-token graph controls and five fused-SwiGLU graph runs on the RTX 3050 
 
 The fused path was 40.29% slower than its fresh graph control and 37.13% below the established 21.209 tok/s graph baseline. The kernel is functionally active and compiler-clean, but bitsandbytes' optimized quantized projection path is substantially faster than this scalar NF4 dot-product implementation. The tactic remains explicit opt-in; the static graph remains the main local path. Evidence: [SwiGLU aggregate](../results/qwen25-3b-sm86-nf4-swiglu-final.json), [v2 run](../results/qwen25-3b-sm86-nf4-swiglu-v2.json), [graph control](../results/qwen25-3b-sm86-nf4-swiglu-control-v2.json), and [native smoke](../artifacts/sm86/kudacuda_nf4_swiglu_smoke.exe).
 
+### BF16/NF4 SwiGLU contract — 2026-08-25
+
+The D-drive Qwen2.5-3B checkpoint was explicitly loaded with BF16 compute to freeze the real contract. The input and post-attention RMSNorm weight are contiguous CUDA BF16 `(1, 2048)` and `(2048,)`. Gate/up weights are non-nested NF4 with packed storage `(11272192, 1)`, logical shape `(11008, 2048)`, blocksize 64, float32 absmax, and no bias. This is a separate `qwen2_swiglu_sm86_bf16_nf4_v1` tactic; the existing FP16 tactic was not changed.
+
+The BF16 bridge, C ABI, sm86/sm89 kernels, manifest entries, decoder-layer hook, and static workspace were implemented. The native smoke matched an independent FP32 reference. Both targets compiled; sm86 `ptxas` reported 48 registers, 8,264 bytes of shared memory, a 32-byte stack frame, and zero spill stores/loads. The graph runner now updates floating attention-mask future slots to dtype-appropriate negative infinity as logical KV length advances. This is required because BF16 attention currently uses framework/SDPA while the FP16 profile uses native GQA dispatch.
+
+Five four-token runs on the RTX 3050 passed exact token/text parity and executed 36 BF16 SwiGLU dispatches per run:
+
+| Mode | Median TTFT | Median ITL | Median throughput | Median peak VRAM | Dispatch/parity | Status |
+|---|---:|---:|---:|---:|---|---|
+| Static graph control without fused SwiGLU | 76.816 ms | 51.650 ms | 17.119 tok/s | 2,139.3 MiB | 0 BF16 dispatches | Fallback-only |
+| Static graph + BF16 fused NF4 SwiGLU | 70.063 ms | 84.897 ms | 12.305 tok/s | 2,140.1 MiB | 36 BF16 dispatches; exact in 5/5 | Partial-native |
+
+The BF16 tactic is therefore not promoted: throughput regressed 28.12% and decode ITL increased 64.37% versus the paired graph control, with a 0.756 MiB peak-VRAM increase. The result validates dtype alignment, pointer ABI, graph safety, numerical parity, and compiler cleanliness, but not performance. The scalar NF4 projection must be replaced by a tensor-core-compatible or framework-compatible packed path before this family can become a serving default. Evidence: [BF16 aggregate](../results/qwen25-3b-sm86-nf4-swiglu-bf16-final.json), [active repeat 1](../results/qwen25-3b-sm86-nf4-swiglu-bf16-active-1.json), [control repeat 1](../results/qwen25-3b-sm86-nf4-bf16-control-1.json), and [BF16 smoke](../artifacts/sm86/kudacuda_nf4_swiglu_bf16_smoke.exe).
+
 ## Full verification matrix
 
-- Python contract/tooling suite: 46/46 passed with `pytest`.
+- Python contract/tooling suite: 49/49 passed with `pytest`.
 - Python compilation: passed for all tracked Python files.
 - Native vector-add smoke: passed with a caller-owned non-default stream and CUDA Graph replay.
 - Native RMSNorm smoke: passed against an independent FP64 reference.
 - Native Qwen2 GQA smoke: passed against an independent FP32 reference.
 - Native fused RMSNorm-QKV smoke: passed against an independent FP32 reference.
 - Native tiled NF4 GEMV v2/v3 smoke: passed against an independent FP32 reference; sm86 and sm89 targets compile.
-- Native fused NF4 SwiGLU smoke: passed against an independent FP32 reference; sm86 and sm89 targets compile; five-run model parity exact.
+- Native fused NF4 SwiGLU smoke: passed against an independent FP32 reference; sm86 and sm89 targets compile; five-run FP16 model parity exact.
+- Native BF16 fused NF4 SwiGLU smoke: passed against an independent FP32 reference; sm86 and sm89 targets compile; five-run model parity exact; 48 registers and zero spill stores/loads on sm86.
 - Native CUDA Graph multi-launch smoke: passed against an independent reference.
-- Qwen2 static decode CUDA Graph: captured/replayed with exact token/text parity; 36 native attention dispatches were recorded during capture.
+- Qwen2 static decode CUDA Graph: captured/replayed with exact token/text parity; FP16 native attention and BF16 framework-attention graph-mask replay are both covered.
 - Experimental Qwen2 GQA variants: correctness passed; group-tiled and vectorized tactics were not promoted after direct-event comparison.
 - Qwen2 native correctness harness: passed for KV lengths 1, 7, 128, and 512; maximum absolute error `1.22e-4`.
 - Qwen2 native microbenchmark: 6.25–10.08× GPU-event speedup versus PyTorch eager attention across the tested KV lengths.
@@ -157,7 +173,7 @@ The native ABI, stream forwarding, graph lifecycle, RMSNorm correctness, and GPU
 
 1. Add a parallel tiled-workspace reduction variant so KV reuse does not collapse the grid to two blocks on small GPUs.
 2. Implement Gemma GQA4 (`Q=8`, `KV=4`, `head_dim=256`) with its sliding-window contract.
-3. Add prefill, BF16, paged KV cache, and batching profiles.
+3. Add BF16 native attention, prefill, paged KV cache, and batching profiles.
 4. Connect the fused RMSNorm-QKV foundation to a Qwen2 NF4/int4 projection contract.
 5. Add quantized matmul and fused MLP paths, which dominate total model time beyond attention.
 6. Build and validate the same Qwen2 tactics on `sm_89`/L40S before production promotion.
@@ -168,7 +184,7 @@ The approved NF4 fused RMSNorm-QKV, fixed-workspace GQA, and fused NF4 SwiGLU pl
 
 ### Correctness and ABI evidence
 
-- Python contract suite: `46/46` tests passed after adding the fused SwiGLU layer-boundary contract and model test double.
+- Python contract suite: `49/49` tests passed after adding the BF16 contract, graph-mask replay guard, and model test double.
 - Python compilation, manifest JSON parsing, and `git diff --check`: passed.
 - RTX 3050 native smoke matrix: vector-add, FP32 RMSNorm, Qwen2 GQA, fused FP16 RMSNorm-QKV, NF4 fused RMSNorm-QKV, workspace GQA, and CUDA Graph replay all passed.
 - Real projection parity against bitsandbytes dequantization plus FP32 matmul: Q max absolute error `0.0078125`, K `0.001953125`, V `0.00048828125`; the native ABI also includes the model's nonzero Q/K/V FP16 biases.

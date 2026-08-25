@@ -198,6 +198,34 @@ class StaticDecodeGraphRunner:
     def captured(self) -> bool:
         return self.contract is not None and self.status == "captured"
 
+    def _update_static_attention_mask(self, valid_kv_len: int) -> None:
+        """Keep framework attention masks valid as the captured cache grows.
+
+        Native GQA dispatch uses ``kv_len_device`` and does not consume this
+        mask. Framework/SDPA fallback does consume it, so future cache slots
+        must remain masked during both capture and replay.
+        """
+
+        attention_mask = self.static_inputs.get("attention_mask")
+        if not isinstance(attention_mask, Mapping):
+            return
+        finfo = getattr(self.torch, "finfo", None)
+        if not callable(finfo):
+            return
+        for value in attention_mask.values():
+            shape = _shape(value)
+            fill = getattr(value, "fill_", None)
+            if not shape or not callable(fill):
+                continue
+            try:
+                minimum = finfo(getattr(value, "dtype", None)).min
+            except (TypeError, ValueError, RuntimeError):
+                continue
+            valid = max(0, min(int(valid_kv_len), shape[-1]))
+            fill(0.0)
+            if valid < shape[-1]:
+                value[..., valid:].fill_(minimum)
+
     @staticmethod
     def model_fingerprint(model: Any) -> str:
         config = getattr(model, "config", None)
@@ -265,6 +293,7 @@ class StaticDecodeGraphRunner:
             "attention_mask": _clone_value(self.torch, attention_mask),
             "cache_position": cache_position,
         }
+        self._update_static_attention_mask(int(logical_kv_len) + 1)
         self.cache = past_key_values
         self.kv_len_device = self.torch.tensor(
             [int(logical_kv_len) + 1],
@@ -399,6 +428,7 @@ class StaticDecodeGraphRunner:
                 device=self.kv_len_device.device,
             )
         )
+        self._update_static_attention_mask(int(logical_kv_len) + 1)
         if self.backend == "torch_cuda_graph" and self.cuda_graph is not None:
             self.cuda_graph.replay()
         else:

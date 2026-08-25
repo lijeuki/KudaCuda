@@ -19,7 +19,7 @@ Stable C ABI + caller CUDA stream
 Target-specific CUDA kernel
 ```
 
-The native pilot paths are `vector_add`, FP32 `rmsnorm`, decode-only Qwen2 grouped-query attention, an opt-in NF4 fused RMSNorm-QKV projection, an opt-in tiled NF4 GEMV projection, an opt-in fused NF4 SwiGLU projection, and an opt-in fixed-workspace GQA tactic. Qwen2.5-3B attention is active only for the exact batch-1/query-1/FP16 profile; prefill, unsupported masks, Gemma/Llama attention, and all other misses use the original Transformers implementation.
+The native pilot paths are `vector_add`, FP32 `rmsnorm`, decode-only Qwen2 grouped-query attention, an opt-in NF4 fused RMSNorm-QKV projection, an opt-in tiled NF4 GEMV projection, separate opt-in FP16 and BF16 fused NF4 SwiGLU projections, and an opt-in fixed-workspace GQA tactic. Qwen2.5-3B attention is active only for the exact batch-1/query-1/FP16 profile; the BF16 profile currently keeps attention on framework/SDPA while its SwiGLU contract dispatches natively. Prefill, unsupported masks, Gemma/Llama attention, and all other misses use the original Transformers implementation.
 
 The Netra-parity expansion adds a cached CUDA module registry, graph capture/replay, an RMSNorm pilot kernel, independent output comparison, benchmark/profiling entry points, target capability manifests, and a kernel-promotion evidence format. See [architecture-portability.md](docs/architecture-portability.md) and [kernel-lifecycle.md](docs/kernel-lifecycle.md).
 
@@ -85,7 +85,7 @@ Run date: 2026-08-25. Hardware: NVIDIA GeForce RTX 3050 Laptop GPU, 4,095.5 MiB 
 
 | Check | Result | Evidence |
 |---|---|---|
-| Python contract/tooling suite | 46/46 passed | `python -m pytest -q` |
+| Python contract/tooling suite | 49/49 passed | `python -m pytest -q` |
 | Python compilation | Passed | `python -m py_compile` over all tracked Python files |
 | Vector-add native smoke | Passed; non-default stream and CUDA Graph replay | `artifacts/sm86/kudacuda_vector_add_smoke.exe` |
 | RMSNorm native smoke | Passed against independent FP64 reference | `artifacts/sm86/kudacuda_rmsnorm_smoke.exe` |
@@ -94,6 +94,7 @@ Run date: 2026-08-25. Hardware: NVIDIA GeForce RTX 3050 Laptop GPU, 4,095.5 MiB 
 | Tiled NF4 GEMV native smoke | Passed against an independent FP32 reference; constant codebook, `uint4` loads, and bias epilogue | `artifacts/sm86/kudacuda_nf4_tiled_gemv_smoke.exe` |
 | Tiled NF4 GEMV v3 native smoke | Passed against an independent FP32 reference; two output rows share a normalized activation tile | `artifacts/sm86/kudacuda_nf4_tiled_gemv_smoke.exe` |
 | NF4 fused SwiGLU native smoke | Passed against an independent FP32 RMSNorm/dequantization/SiLU reference; 36 active graph dispatches in model runs | `artifacts/sm86/kudacuda_nf4_swiglu_smoke.exe` |
+| BF16 NF4 fused SwiGLU native smoke | Passed against an independent FP32 reference; BF16 input/norm/output ABI; 48 registers and zero ptxas spills | `artifacts/sm86/kudacuda_nf4_swiglu_bf16_smoke.exe` |
 | Workspace GQA native smoke | Passed for KV lengths 1, 7, 64, 128, 512 | `artifacts/sm86/kudacuda_qwen2_gqa_workspace_smoke.exe` |
 | RMSNorm PyTorch harness | Validated; max absolute error `5.004e-7` | [rmsnorm-sm86-final.json](results/rmsnorm-sm86-final.json) |
 | Vector-add PyTorch harness | Validated exactly; 0.0722 ms average GPU event time | [vector-add-sm86-final.json](results/vector-add-sm86-final.json) |
@@ -211,6 +212,14 @@ Five four-token graph controls and five fused-SwiGLU graph runs on the RTX 3050 
 
 The fused path is 40.29% slower than its fresh graph control and 37.13% below the established 21.209 tok/s graph baseline. This is evidence that a handwritten scalar NF4 projection is behind bitsandbytes' optimized quantized projection path; four-row activation reuse alone does not change that conclusion. The tactic remains available only through `--fused-swiglu`, while `qwen2_gqa_decode_sm86_fp16_graph_v1` remains the main path. Evidence: [SwiGLU aggregate](results/qwen25-3b-sm86-nf4-swiglu-final.json), [first v2 run](results/qwen25-3b-sm86-nf4-swiglu-v2.json), [graph control](results/qwen25-3b-sm86-nf4-swiglu-control-v2.json), and [native smoke](artifacts/sm86/kudacuda_nf4_swiglu_smoke.exe).
 
+#### BF16/NF4 SwiGLU contract
+
+The real D-drive Qwen2.5-3B checkpoint was explicitly loaded with BF16 compute. Its input and post-attention RMSNorm weights are contiguous CUDA BF16 `(1, 2048)` and `(2048,)`; gate/up storage is non-nested NF4 with packed shape `(11272192, 1)`, logical shape `(11008, 2048)`, blocksize 64, float32 absmax, and no projection bias. KudaCuda now exposes this as the separate `qwen2_swiglu_sm86_bf16_nf4_v1` contract and keeps the existing FP16 `qwen2_swiglu_sm86_nf4_v1` contract unchanged.
+
+The BF16 native kernel passed its independent reference smoke, compiled for `sm_86` and `sm_89`, and the sm86 `ptxas` audit reported 48 registers, 8,264 bytes of shared memory, a 32-byte stack frame, and zero spill stores/loads. The graph runner also updates floating graph masks to the current logical KV length so framework BF16/SDPA attention preserves exact behavior during replay.
+
+Five four-token RTX 3050 graph runs passed exact token/text parity and executed 36 native BF16 SwiGLU dispatches per run. The tactic is not promoted: median throughput was 12.305 tok/s versus 17.119 tok/s for the paired graph control without fused SwiGLU (`-28.12%`), while peak VRAM increased by 0.756 MiB. The result shows the ABI and integration are correct, but the scalar handwritten NF4 projection is slower than the framework's optimized quantized path. Use it for BF16 contract validation with `--fused-swiglu-bf16`; the existing graph remains the performance path. Evidence: [BF16 aggregate](results/qwen25-3b-sm86-nf4-swiglu-bf16-final.json), [active repeat 1](results/qwen25-3b-sm86-nf4-swiglu-bf16-active-1.json), [control repeat 1](results/qwen25-3b-sm86-nf4-bf16-control-1.json), and [BF16 smoke](artifacts/sm86/kudacuda_nf4_swiglu_bf16_smoke.exe).
+
 ### 300 tok/s execution plan
 
 The 300 tok/s target is a stretch target for this 4 GiB RTX 3050, not a result of the current QKV experiment. At present, v3 changes only the QKV projection and the verified whole-model ceiling is 21.209 tok/s. Reaching 300 tok/s would require a different serving envelope—likely fixed-shape, single-token decode with all large NF4 projections native, full graph capture, and/or aggregate throughput from batching. The remaining work is staged as follows:
@@ -235,7 +244,7 @@ The production default remains the per-query-head `qwen2_gqa_decode_sm86_fp16` t
 
 The group-tiled kernel reuses KV tiles across query heads, but its current two-KV-group grid underutilizes the RTX 3050 at long KV lengths. The vectorized kernel preserves query-head parallelism and is closer, but still loses to the existing baseline. See the [group-tiled microbenchmark](results/qwen2-gqa-sm86-group-tiled-microbenchmark.json), [vectorized microbenchmark](results/qwen2-gqa-sm86-vectorized-microbenchmark.json), [group-tiled model run](results/qwen25-3b-sm86-group-tiled-model-final.json), and [vectorized model run](results/qwen25-3b-sm86-vectorized-model.json).
 
-The NF4 fused RMSNorm-QKV, tiled NF4 GEMV, fused NF4 SwiGLU, and workspace GQA kernels are validated and integrated as opt-in experimental paths. They are not the default because each measured projection/workspace variant regressed against the existing graph tactic. The static decode graph remains the best verified KudaCuda path; none of these experiments yet cover Gemma, BF16, batching, or paged KV.
+The NF4 fused RMSNorm-QKV, tiled NF4 GEMV, FP16/BF16 fused NF4 SwiGLU, and workspace GQA kernels are validated and integrated as opt-in experimental paths. They are not the default because each measured projection/workspace variant regressed against the existing graph tactic. The static decode graph remains the best verified KudaCuda path; Gemma, batching, paged KV, and BF16 native attention remain future work.
 
 ## Validation
 

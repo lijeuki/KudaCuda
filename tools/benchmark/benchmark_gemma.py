@@ -257,10 +257,17 @@ def run_graph_generation(
             dynamic_cache,
             max_cache_len=int(kv_bucket),
         )
+        model_dtype = getattr(model, "dtype", torch.float32)
+        if model_dtype not in (torch.float16, torch.bfloat16):
+            model_dtype = torch.float32
         graph_attention_mask = {
             "full_attention": torch.zeros(
                 (1, 1, 1, int(kv_bucket)),
-                dtype=attention_mask.dtype,
+                # Qwen eager attention adds this mask to BF16 attention
+                # scores. The tokenizer mask is int64, which is valid as an
+                # input mask but invalid at that attention-score boundary.
+                # Match the model compute dtype for eager and SDPA paths.
+                dtype=model_dtype,
                 device=device,
             )
         }
@@ -377,6 +384,7 @@ def _install_attention_patch(
     tiled_nf4_gemv: bool = False,
     tiled_nf4_gemv_v3: bool = False,
     fused_swiglu: bool = False,
+    fused_swiglu_bf16: bool = False,
 ) -> tuple[Callable[[], None], str]:
     """Patch the model's concrete attention class with its exact tactic contract."""
 
@@ -414,8 +422,10 @@ def _install_attention_patch(
         unpatches = [attention_unpatch]
         if fused_swiglu:
             swiglu_tactic = bridge.manifest.get(
-                "preferred_qwen_swiglu_tactic",
-                f"qwen2_swiglu_{arch}_nf4_v1",
+                "preferred_qwen_swiglu_bf16_tactic"
+                if fused_swiglu_bf16
+                else "preferred_qwen_swiglu_tactic",
+                f"qwen2_swiglu_{arch}_{'bf16_' if fused_swiglu_bf16 else ''}nf4_v1",
             )
             unpatches.append(patch_qwen2_swiglu(model, bridge, tactic_name=swiglu_tactic))
 
@@ -479,6 +489,11 @@ def main(argv: list[str] | None = None) -> int:
         "--fused-swiglu",
         action="store_true",
         help="Opt into the experimental native post-attention NF4 SwiGLU hook.",
+    )
+    parser.add_argument(
+        "--fused-swiglu-bf16",
+        action="store_true",
+        help="Opt into the separate experimental BF16/NF4 SwiGLU contract.",
     )
     parser.add_argument("--graph-decode", action="store_true")
     parser.add_argument("--graph-kv-bucket", type=int, default=512)
@@ -585,7 +600,8 @@ def main(argv: list[str] | None = None) -> int:
                 fused_qkv=args.fused_qkv or args.tiled_nf4_gemv or args.tiled_nf4_gemv_v3,
                 tiled_nf4_gemv=args.tiled_nf4_gemv,
                 tiled_nf4_gemv_v3=args.tiled_nf4_gemv_v3,
-                fused_swiglu=args.fused_swiglu,
+                fused_swiglu=args.fused_swiglu or args.fused_swiglu_bf16,
+                fused_swiglu_bf16=args.fused_swiglu_bf16,
                 qwen_tactic=(
                     args.qwen_tactic
                     or (
@@ -632,7 +648,8 @@ def main(argv: list[str] | None = None) -> int:
                         fused_qkv=args.fused_qkv or args.tiled_nf4_gemv or args.tiled_nf4_gemv_v3,
                         tiled_nf4_gemv=args.tiled_nf4_gemv,
                         tiled_nf4_gemv_v3=args.tiled_nf4_gemv_v3,
-                        fused_swiglu=args.fused_swiglu,
+                        fused_swiglu=args.fused_swiglu or args.fused_swiglu_bf16,
+                        fused_swiglu_bf16=args.fused_swiglu_bf16,
                         qwen_tactic=f"qwen2_gqa_decode_{str(bridge.manifest.get('target_arch', 'sm_86')).replace('sm_', 'sm')}_fp16",
                     )
                     generation = run_generation(
@@ -659,18 +676,32 @@ def main(argv: list[str] | None = None) -> int:
             native_fused_qkv_v2_dispatches = int(getattr(bridge, "native_fused_qkv_v2_dispatches", 0))
             native_fused_qkv_v3_dispatches = int(getattr(bridge, "native_fused_qkv_v3_dispatches", 0))
             native_swiglu_dispatches = int(getattr(bridge, "native_swiglu_dispatches", 0))
+            native_swiglu_bf16_dispatches = int(getattr(bridge, "native_swiglu_bf16_dispatches", 0))
             fused_qkv_hook_calls = int(getattr(bridge, "native_fused_qkv_hook_calls", 0))
             swiglu_hook_calls = int(getattr(bridge, "native_swiglu_hook_calls", 0))
             dispatch_reason = getattr(bridge, "last_qwen2_dispatch_reason", None)
             fused_dispatch_reason = getattr(bridge, "last_qwen2_fused_qkv_dispatch_reason", None)
             swiglu_dispatch_reason = getattr(bridge, "last_swiglu_dispatch_reason", None)
+            qkv_requested = args.fused_qkv or args.tiled_nf4_gemv or args.tiled_nf4_gemv_v3
+            swiglu_requested = args.fused_swiglu or args.fused_swiglu_bf16
+            native_families = []
+            if native_dispatches > 0:
+                native_families.append("attention")
+            if native_fused_qkv_dispatches > 0:
+                native_families.append("fused_qkv")
+            if native_swiglu_dispatches > 0:
+                native_families.append(
+                    "fused_swiglu_bf16_nf4" if args.fused_swiglu_bf16 else "fused_swiglu_nf4"
+                )
             sidecar_status = (
                 "completed"
                 if dispatcher
                 and tactic_status in {"implemented", "experimental"}
                 and native_dispatches > 0
-                and (not (args.fused_qkv or args.tiled_nf4_gemv or args.tiled_nf4_gemv_v3) or native_fused_qkv_dispatches > 0)
-                and (not args.fused_swiglu or native_swiglu_dispatches > 0)
+                and (not qkv_requested or native_fused_qkv_dispatches > 0)
+                and (not swiglu_requested or native_swiglu_dispatches > 0)
+                else "partial-native"
+                if native_families
                 else "fallback-only"
             )
             payload["sidecar"] = {
@@ -683,6 +714,8 @@ def main(argv: list[str] | None = None) -> int:
                 "native_fused_qkv_v2_dispatches": native_fused_qkv_v2_dispatches,
                 "native_fused_qkv_v3_dispatches": native_fused_qkv_v3_dispatches,
                 "native_swiglu_dispatches": native_swiglu_dispatches,
+                "native_swiglu_bf16_dispatches": native_swiglu_bf16_dispatches,
+                "active_native_families": native_families,
                 "fused_qkv_hook_calls": fused_qkv_hook_calls,
                 "swiglu_hook_calls": swiglu_hook_calls,
                 "last_qwen2_dispatch_reason": dispatch_reason,
@@ -691,11 +724,15 @@ def main(argv: list[str] | None = None) -> int:
                 "fused_qkv_requested": bool(args.fused_qkv or args.tiled_nf4_gemv or args.tiled_nf4_gemv_v3),
                 "tiled_nf4_gemv_requested": bool(args.tiled_nf4_gemv),
                 "tiled_nf4_gemv_v3_requested": bool(args.tiled_nf4_gemv_v3),
-                "fused_swiglu_requested": bool(args.fused_swiglu),
+                "fused_swiglu_requested": bool(args.fused_swiglu or args.fused_swiglu_bf16),
+                "fused_swiglu_bf16_requested": bool(args.fused_swiglu_bf16),
                 "fused_swiglu_tactic": bridge.manifest.get(
-                    "preferred_qwen_swiglu_tactic",
-                    f"qwen2_swiglu_{str(bridge.manifest.get('target_arch', 'sm_86')).replace('sm_', 'sm')}_nf4_v1",
-                ) if args.fused_swiglu else None,
+                    "preferred_qwen_swiglu_bf16_tactic"
+                    if args.fused_swiglu_bf16
+                    else "preferred_qwen_swiglu_tactic",
+                    f"qwen2_swiglu_{str(bridge.manifest.get('target_arch', 'sm_86')).replace('sm_', 'sm')}_"
+                    f"{'bf16_' if args.fused_swiglu_bf16 else ''}nf4_v1",
+                ) if (args.fused_swiglu or args.fused_swiglu_bf16) else None,
                 "fused_qkv_tactic": bridge.manifest.get(
                     "preferred_qwen_tiled_nf4_gemv_v3_tactic"
                     if args.tiled_nf4_gemv_v3

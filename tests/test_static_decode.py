@@ -20,6 +20,7 @@ class FakeTensor:
             FakeTensor.next_pointer += 1
         self.pointer = pointer
         self.copy_calls = 0
+        self.fill_values = []
 
     def data_ptr(self):
         return self.pointer
@@ -31,10 +32,20 @@ class FakeTensor:
         self.copy_calls += 1
         return self
 
+    def __getitem__(self, key):
+        return self
+
+    def fill_(self, value):
+        self.fill_values.append(value)
+        return self
+
 
 class FakeTorch:
     int32 = "int32"
     long = "int64"
+    float16 = "float16"
+    bfloat16 = "bfloat16"
+    float32 = "float32"
 
     class _Context:
         def __enter__(self):
@@ -50,6 +61,10 @@ class FakeTorch:
     @staticmethod
     def tensor(values, *, dtype, device):
         return FakeTensor((len(values),), dtype=dtype, device=device)
+
+    @staticmethod
+    def finfo(dtype):
+        return SimpleNamespace(min=-65504.0 if dtype == "float16" else -3.4e38)
 
 
 class FakeBridge:
@@ -136,6 +151,21 @@ class StaticDecodeTests(unittest.TestCase):
         self.assertEqual(model.calls, 1)
         self.assertEqual(runner.status, "captured")
         self.assertIn(("replay", 77), bridge.calls)
+
+    def test_capture_and_replay_update_floating_graph_mask_to_current_kv_length(self):
+        runner, _bridge, _model, common = make_runner()
+        runner.capture(**common)
+        mask = runner.static_inputs["attention_mask"]["full_attention"]
+        self.assertIn(-65504.0, mask.fill_values)
+
+        runner.replay(
+            next_token=FakeTensor((1, 1), dtype="int64", pointer=20),
+            position_ids=FakeTensor((1, 1), dtype="int64", pointer=21),
+            cache_position=33,
+            logical_kv_len=33,
+            stream_ptr=77,
+        )
+        self.assertGreaterEqual(mask.fill_values.count(-65504.0), 2)
 
     def test_changed_stream_is_rejected_before_replay(self):
         runner, _bridge, _model, common = make_runner()
