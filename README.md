@@ -19,7 +19,7 @@ Stable C ABI + caller CUDA stream
 Target-specific CUDA kernel
 ```
 
-The native pilot paths are `vector_add`, FP32 `rmsnorm`, and decode-only Qwen2 grouped-query attention. Qwen2.5-3B attention is active only for the exact batch-1/query-1/FP16 profile; prefill, unsupported masks, Gemma/Llama attention, and all other misses use the original Transformers implementation.
+The native pilot paths are `vector_add`, FP32 `rmsnorm`, decode-only Qwen2 grouped-query attention, an opt-in NF4 fused RMSNorm-QKV projection, and an opt-in fixed-workspace GQA tactic. Qwen2.5-3B attention is active only for the exact batch-1/query-1/FP16 profile; prefill, unsupported masks, Gemma/Llama attention, and all other misses use the original Transformers implementation.
 
 The Netra-parity expansion adds a cached CUDA module registry, graph capture/replay, an RMSNorm pilot kernel, independent output comparison, benchmark/profiling entry points, target capability manifests, and a kernel-promotion evidence format. See [architecture-portability.md](docs/architecture-portability.md) and [kernel-lifecycle.md](docs/kernel-lifecycle.md).
 
@@ -54,7 +54,7 @@ cmake --build build --config Release
 
 The Python bridge loads `kudacuda.dll` on Windows and `libkudacuda.so` on Linux. The native launch API does not synchronize; the caller owns stream ordering and synchronization. The Qwen2 bridge passes post-RoPE, post-cache-update Q/K/V pointers directly to the native kernel without staging copies.
 
-For the verified RTX 3050 build in this workspace, use [`artifacts/sm86/kudacuda.dll`](artifacts/sm86/kudacuda.dll). The companion smoke executables are in the same directory. The DLL exports the Qwen2 ABI and passes vector-add, RMSNorm, and Qwen2 GQA GPU smoke tests.
+For the verified RTX 3050 build in this workspace, use [`artifacts/sm86/kudacuda.dll`](artifacts/sm86/kudacuda.dll). The companion smoke executables are in the same directory. The DLL exports the Qwen2 ABI and passes vector-add, RMSNorm, Qwen2 GQA, and fused RMSNorm-QKV GPU smoke tests.
 
 ## Python bridge usage
 
@@ -81,19 +81,24 @@ Select `manifests/l40s-sm89.json` and the `sm_89` build output on the L40S. The 
 
 ## Latest verification and benchmark results
 
-Run date: 2026-08-24. Hardware: NVIDIA GeForce RTX 3050 Laptop GPU, 4,095.5 MiB VRAM, driver 610.88, CUDA UMD 13.3, `nvcc 13.3.73`, Windows/Python 3.13.
+Run date: 2026-08-25. Hardware: NVIDIA GeForce RTX 3050 Laptop GPU, 4,095.5 MiB VRAM, driver 610.88, CUDA UMD 13.3, `nvcc 13.3.73`, Windows/Python 3.13.
 
 | Check | Result | Evidence |
 |---|---|---|
-| Python contract/tooling suite | 25/25 passed | `python -m unittest discover -s tests -p 'test_*.py' -v` |
+| Python contract/tooling suite | 40/40 passed | `python -m unittest discover -s tests -p 'test_*.py'` |
 | Python compilation | Passed | `python -m py_compile` over all tracked Python files |
 | Vector-add native smoke | Passed; non-default stream and CUDA Graph replay | `artifacts/sm86/kudacuda_vector_add_smoke.exe` |
 | RMSNorm native smoke | Passed against independent FP64 reference | `artifacts/sm86/kudacuda_rmsnorm_smoke.exe` |
+| Fused RMSNorm-QKV native smoke | Passed against independent FP32 reference | `artifacts/sm86/kudacuda_rmsnorm_qkv_smoke.exe` |
+| NF4 fused RMSNorm-QKV native smoke | Passed with bitsandbytes nibble order and bias-aware ABI | `artifacts/sm86/kudacuda_nf4_fused_qkv_smoke.exe` |
+| Workspace GQA native smoke | Passed for KV lengths 1, 7, 64, 128, 512 | `artifacts/sm86/kudacuda_qwen2_gqa_workspace_smoke.exe` |
 | RMSNorm PyTorch harness | Validated; max absolute error `5.004e-7` | [rmsnorm-sm86-final.json](results/rmsnorm-sm86-final.json) |
 | Vector-add PyTorch harness | Validated exactly; 0.0722 ms average GPU event time | [vector-add-sm86-final.json](results/vector-add-sm86-final.json) |
 | Qwen2 GQA native correctness | Validated for KV lengths 1, 7, 128, 512; max absolute error `1.22e-4` | [qwen2-gqa-sm86-native-optimized-final.json](results/qwen2-gqa-sm86-native-optimized-final.json) |
 | Qwen2 GQA microbenchmark | Native kernel 6.25–10.08× faster than PyTorch eager attention on tested KV lengths | [qwen2-gqa-sm86-microbenchmark-optimized-final.json](results/qwen2-gqa-sm86-microbenchmark-optimized-final.json) |
 | Qwen2 Nsight Systems | Native `qwen2_gqa_decode_kernel` visible in GPU kernel summary | [nsys-qwen2-sm86-native.nsys-rep](results/nsys-qwen2-sm86-native.nsys-rep) |
+| CUDA Graph multi-launch smoke | Passed; capture/replay matched an independent reference | `artifacts/sm86/kudacuda_cuda_graph_smoke.exe` |
+| Qwen2 static decode CUDA Graph | Captured with PyTorch graph pool; exact token/text parity in the verified run | [qwen25-3b-sm86-graph-model-final.json](results/qwen25-3b-sm86-graph-model-final.json) |
 | Nsight Systems | Validated; report generated | [profiling-sm86-final.json](results/profiling-sm86-final.json) |
 | Nsight Compute | Blocked by `ERR_NVGPUCTRPERM` performance-counter permissions | [profiling-sm86-final.json](results/profiling-sm86-final.json) |
 | `sm_89` compilation | Completed with MSVC Build Tools, CUDA 13.3, and CMake/Ninja; runtime pending on an L40S | [sm89-build-final.json](results/sm89-build-final.json) |
@@ -120,6 +125,54 @@ Fresh paired retry on 2026-08-25, using the same Qwen2.5-3B 4-bit model, prompt,
 | Active KudaCuda sidecar | 68.01 ms | 59.34 ms | 16.699 tok/s | 2,109.5 MiB | Exact; 576 native launches |
 
 The fresh sidecar run improved throughput by 18.9%, reduced decode ITL by 16.4%, reduced total generation time by 15.9%, and preserved exact token/text output. Evidence: [fresh paired retry](results/qwen25-3b-sm86-sidecar-retry.json). A separate standalone baseline run measured 13.363 tok/s, showing normal run-to-run variance; the within-process baseline above is the fair comparison.
+
+### Opt-in static decode CUDA Graph
+
+The new `--graph-decode` path captures the complete fixed-shape Qwen2 decode forward with `torch.cuda.CUDAGraph` and its graph memory pool on a dedicated non-default stream. The KudaCuda graph-safe GQA kernel reads logical KV length from a device scalar while using a fixed-capacity cache, so replay changes tensor contents rather than pointers or shapes. Sampling remains outside the graph. A native `begin/end_capture` remains available for CUDA-only callers and smoke tests; it is not wrapped around PyTorch model allocation.
+
+The verified RTX 3050 run used Qwen2.5-3B 4-bit, four generated tokens, and a 512-token KV bucket:
+
+| Mode | TTFT | ITL | Throughput | Peak VRAM | Graph evidence | Output parity |
+|---|---:|---:|---:|---:|---|---|
+| Without KudaCuda | 74.27 ms | 70.26 ms | 14.033 tok/s | 2,109.7 MiB | — | — |
+| Static CUDA Graph sidecar | 73.04 ms | 38.81 ms | 21.110 tok/s | 2,135.6 MiB | 36 native dispatches; 3 replays; 78.59 ms capture | Exact |
+
+This is a one-run, short-decode validation rather than a production promotion. The graph tactic remains experimental until repeated median benchmarks, longer contexts, graph-pool memory sizing, and `sm_89` runtime validation are complete. The benchmark now fails closed as `failed-parity` if a native/graph path produces different tokens or text.
+
+The latest paired graph rerun on the same RTX 3050 reached `23.139 tok/s` versus `15.456 tok/s` without KudaCuda, with exact token/text parity, 36 native dispatches, and 3 graph replays. This is still a short four-token measurement; it is recorded separately from the earlier `21.110 tok/s` run because GPU and allocator variance is material on this 4 GiB laptop.
+
+| Mode | TTFT | ITL | Throughput | Peak VRAM | Output parity |
+|---|---:|---:|---:|---:|---|
+| Latest paired baseline | 71.69 ms | 62.37 ms | 15.456 tok/s | 2,109.7 MiB | — |
+| Latest static graph sidecar | 67.23 ms | 35.21 ms | 23.139 tok/s | 2,135.6 MiB | Exact; 36 dispatches; 3 replays |
+
+Evidence: [latest graph rerun](results/qwen25-3b-sm86-graph-model-current.json).
+
+### NF4 fused QKV and workspace-GQA results
+
+The fused path was tested against the real D-drive Qwen2.5-3B NF4 checkpoint. Projection-level outputs matched bitsandbytes dequantization plus FP32 matmul within FP16 rounding (`max_abs`: Q `0.0078125`, K `0.001953125`, V `0.00048828125`). The four-token graph run produced exact token/text parity and 36 native fused-QKV dispatches during capture, but the correctness-first kernel regressed throughput because it is not yet a tiled GEMV implementation. The latest paired fused run is:
+
+| Mode | TTFT | ITL | Throughput | Peak VRAM | Dispatch evidence | Output parity |
+|---|---:|---:|---:|---:|---|---|
+| Without KudaCuda | 75.09 ms | 67.03 ms | 14.483 tok/s | 2,109.7 MiB | — | — |
+| NF4 fused QKV + static graph | 67.42 ms | 236.30 ms | 5.153 tok/s | 2,135.8 MiB | 36 fused QKV + 36 GQA | Exact |
+| Workspace GQA static graph | 71.27 ms | 48.94 ms | 18.340 tok/s | 2,135.7 MiB | 36 workspace GQA | Exact |
+
+Evidence: [NF4 fused QKV run](results/qwen25-3b-sm86-nf4-fused-qkv.json), [five-run NF4 repeat 1](results/qwen25-3b-sm86-nf4-fused-qkv-repeat-1.json), and [workspace GQA run](results/qwen25-3b-sm86-workspace-gqa.json). The five-run NF4 median was 5.126 tok/s versus 15.358 tok/s for the paired baseline, with exact parity in all five runs. The workspace row's paired baseline was 15.543 tok/s. Both tactics remain experimental and opt-in; the existing graph tactic remains the better local path. The next optimization is a tiled NF4 GEMV with bias epilogue, not promotion of the current correctness-first kernel.
+
+### Attention optimization experiments
+
+The production default remains the per-query-head `qwen2_gqa_decode_sm86_fp16` tactic. It measured `0.0657 ms` at KV length 512 in the direct CUDA-event baseline. Two new FP16 variants were compiled, checked against an independent FP32 reference, and kept experimental because their small-GPU launch geometry is not yet better than the default:
+
+| Tactic | KV 512 time | Result |
+|---|---:|---|
+| Per-query-head baseline | 0.0657 ms | Active default |
+| Group-tiled v2 | 0.1713 ms | Correct; experimental, not promoted |
+| Vectorized v2 | 0.1140 ms | Correct; experimental, not promoted |
+
+The group-tiled kernel reuses KV tiles across query heads, but its current two-KV-group grid underutilizes the RTX 3050 at long KV lengths. The vectorized kernel preserves query-head parallelism and is closer, but still loses to the existing baseline. See the [group-tiled microbenchmark](results/qwen2-gqa-sm86-group-tiled-microbenchmark.json), [vectorized microbenchmark](results/qwen2-gqa-sm86-vectorized-microbenchmark.json), [group-tiled model run](results/qwen25-3b-sm86-group-tiled-model-final.json), and [vectorized model run](results/qwen25-3b-sm86-vectorized-model.json).
+
+The NF4 fused RMSNorm-QKV and workspace GQA kernels are validated and integrated as opt-in experimental paths. They are not the default because the measured fused projection path regressed throughput and the workspace GQA path is slower than the existing graph tactic. The static decode graph remains the best verified KudaCuda path; none of these experiments yet cover Gemma, BF16, batching, or paged KV.
 
 ## Validation
 

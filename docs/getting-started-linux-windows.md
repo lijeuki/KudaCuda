@@ -91,6 +91,20 @@ python tools/benchmark/benchmark_gemma.py \
 
 The script is model-generic despite its historical filename. Qwen2.5-3B uses the active `qwen2_gqa_decode_sm86_fp16` tactic when the exact decode contract matches; Gemma and unsupported profiles remain `fallback-only`. A DLL load without native launch counts is never a speedup claim.
 
+For an opt-in fixed-shape Qwen2 decode graph, use a bucket large enough for the prompt plus generated tokens:
+
+```powershell
+python tools/benchmark/benchmark_gemma.py `
+  --model D:\AI\Models\HuggingFace\hub\models--Qwen--Qwen2.5-3B-Instruct\snapshots\aa8e72537993ba99e69dfaafa59ed015b17504d1 `
+  --manifest manifests\rtx3050-sm86.json `
+  --library artifacts\sm86\kudacuda.dll `
+  --load-in-4bit --device cuda --dtype float16 `
+  --max-new-tokens 16 --graph-decode --graph-kv-bucket 512 `
+  --output results\qwen25-3b-sm86-graph-model.json
+```
+
+Graph mode is experimental and requires exact token/text parity before it is considered an acceleration result. It uses PyTorch's graph allocator for the model capture; KudaCuda's native graph ABI remains available for CUDA-only callers and smoke tests.
+
 The direct Qwen2 validation and microbenchmark are:
 
 ```powershell

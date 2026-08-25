@@ -40,6 +40,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--repetitions", type=int, default=100)
     parser.add_argument("--kv-lens", type=int, nargs="+", default=[1, 7, 128, 512])
+    parser.add_argument(
+        "--tactic",
+        default=None,
+        help="Exact Qwen tactic name; defaults to the architecture baseline tactic.",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -59,7 +64,7 @@ def main(argv: list[str] | None = None) -> int:
     torch.manual_seed(20260824)
     bridge = KudaCudaBridge(manifest=args.manifest, lib_path=args.library)
     target_arch = str(bridge.manifest["target_arch"]).replace("sm_", "sm")
-    tactic_name = f"qwen2_gqa_decode_{target_arch}_fp16"
+    tactic_name = args.tactic or f"qwen2_gqa_decode_{target_arch}_fp16"
     stream_ptr = int(torch.cuda.current_stream(device).cuda_stream)
     cases: list[dict[str, Any]] = []
     try:

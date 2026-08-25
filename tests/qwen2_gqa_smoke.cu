@@ -37,6 +37,7 @@ int main(int argc, char** argv) {
     constexpr int head_dim = 128;
     constexpr float scale = 1.0F / 11.313708498984761F;
     constexpr float tolerance = 3.5e-3F;
+    const int32_t host_kv_len = kv_len;
 
     if (!check_cuda(cudaSetDevice(device_id), "cudaSetDevice")) {
         return 1;
@@ -48,6 +49,9 @@ int main(int argc, char** argv) {
     std::vector<__half> host_key(cache_count);
     std::vector<__half> host_value(cache_count);
     std::vector<__half> host_output(query_count);
+    std::vector<__half> host_group_output(query_count);
+    std::vector<__half> host_vectorized_output(query_count);
+    std::vector<__half> host_graph_output(query_count);
     std::vector<__half> host_expected(query_count);
 
     for (std::size_t index = 0; index < query_count; ++index) {
@@ -93,6 +97,10 @@ int main(int argc, char** argv) {
     __half* device_key = nullptr;
     __half* device_value = nullptr;
     __half* device_output = nullptr;
+    __half* device_group_output = nullptr;
+    __half* device_vectorized_output = nullptr;
+    __half* device_graph_output = nullptr;
+    int32_t* device_kv_len = nullptr;
     cudaStream_t stream = nullptr;
     void* handle = nullptr;
     int exit_code = 1;
@@ -103,10 +111,15 @@ int main(int argc, char** argv) {
     if (!check_cuda(cudaMalloc(&device_key, cache_bytes), "cudaMalloc(key)")) goto cleanup;
     if (!check_cuda(cudaMalloc(&device_value, cache_bytes), "cudaMalloc(value)")) goto cleanup;
     if (!check_cuda(cudaMalloc(&device_output, query_bytes), "cudaMalloc(output)")) goto cleanup;
+    if (!check_cuda(cudaMalloc(&device_group_output, query_bytes), "cudaMalloc(group_output)")) goto cleanup;
+    if (!check_cuda(cudaMalloc(&device_vectorized_output, query_bytes), "cudaMalloc(vectorized_output)")) goto cleanup;
+    if (!check_cuda(cudaMalloc(&device_graph_output, query_bytes), "cudaMalloc(graph_output)")) goto cleanup;
+    if (!check_cuda(cudaMalloc(&device_kv_len, sizeof(int32_t)), "cudaMalloc(kv_len)")) goto cleanup;
     if (!check_cuda(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "cudaStreamCreateWithFlags")) goto cleanup;
     if (!check_cuda(cudaMemcpyAsync(device_query, host_query.data(), query_bytes, cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync(query)")) goto cleanup;
     if (!check_cuda(cudaMemcpyAsync(device_key, host_key.data(), cache_bytes, cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync(key)")) goto cleanup;
     if (!check_cuda(cudaMemcpyAsync(device_value, host_value.data(), cache_bytes, cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync(value)")) goto cleanup;
+    if (!check_cuda(cudaMemcpyAsync(device_kv_len, &host_kv_len, sizeof(host_kv_len), cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync(kv_len)")) goto cleanup;
 
     handle = kudacuda_create(device_id);
     if (handle == nullptr || kudacuda_freeze(handle) != 0) {
@@ -132,15 +145,97 @@ int main(int argc, char** argv) {
             scale,
             reinterpret_cast<uint64_t>(stream)) != 0) {
         std::cerr << "kudacuda_qwen2_gqa_decode failed: " << kudacuda_last_error(handle) << '\n';
+            goto cleanup;
+    }
+    if (kudacuda_can_dispatch(handle, "qwen2_gqa_decode_sm86_fp16_group_tiled_v2", 1, 1) != 1) {
+        std::cerr << "Qwen2 group-tiled GQA tactic was not dispatchable\n";
+        goto cleanup;
+    }
+    if (kudacuda_qwen2_gqa_decode_group_tiled(
+            handle,
+            reinterpret_cast<uint64_t>(device_query),
+            reinterpret_cast<uint64_t>(device_key),
+            reinterpret_cast<uint64_t>(device_value),
+            reinterpret_cast<uint64_t>(device_group_output),
+            batch_size,
+            query_len,
+            kv_len,
+            query_heads,
+            kv_heads,
+            head_dim,
+            scale,
+            reinterpret_cast<uint64_t>(stream)) != 0) {
+        std::cerr << "kudacuda_qwen2_gqa_decode_group_tiled failed: " << kudacuda_last_error(handle) << '\n';
+        goto cleanup;
+    }
+    if (kudacuda_can_dispatch(handle, "qwen2_gqa_decode_sm86_fp16_vectorized_v2", 1, 1) != 1) {
+        std::cerr << "Qwen2 vectorized GQA tactic was not dispatchable\n";
+        goto cleanup;
+    }
+    if (kudacuda_qwen2_gqa_decode_vectorized(
+            handle,
+            reinterpret_cast<uint64_t>(device_query),
+            reinterpret_cast<uint64_t>(device_key),
+            reinterpret_cast<uint64_t>(device_value),
+            reinterpret_cast<uint64_t>(device_vectorized_output),
+            batch_size,
+            query_len,
+            kv_len,
+            query_heads,
+            kv_heads,
+            head_dim,
+            scale,
+            reinterpret_cast<uint64_t>(stream)) != 0) {
+        std::cerr << "kudacuda_qwen2_gqa_decode_vectorized failed: " << kudacuda_last_error(handle) << '\n';
+        goto cleanup;
+    }
+    if (kudacuda_can_dispatch(handle, "qwen2_gqa_decode_sm86_fp16_graph_v1", 1, 1) != 1) {
+        std::cerr << "Qwen2 graph GQA tactic was not dispatchable\n";
+        goto cleanup;
+    }
+    if (kudacuda_qwen2_gqa_decode_graph(
+            handle,
+            reinterpret_cast<uint64_t>(device_query),
+            reinterpret_cast<uint64_t>(device_key),
+            reinterpret_cast<uint64_t>(device_value),
+            reinterpret_cast<uint64_t>(device_graph_output),
+            batch_size,
+            query_len,
+            kv_len,
+            query_heads,
+            kv_heads,
+            head_dim,
+            scale,
+            reinterpret_cast<uint64_t>(device_kv_len),
+            reinterpret_cast<uint64_t>(stream)) != 0) {
+        std::cerr << "kudacuda_qwen2_gqa_decode_graph failed: " << kudacuda_last_error(handle) << '\n';
         goto cleanup;
     }
     if (!check_cuda(cudaMemcpyAsync(host_output.data(), device_output, query_bytes, cudaMemcpyDeviceToHost, stream), "cudaMemcpyAsync(output)")) goto cleanup;
+    if (!check_cuda(cudaMemcpyAsync(host_group_output.data(), device_group_output, query_bytes, cudaMemcpyDeviceToHost, stream), "cudaMemcpyAsync(group_output)")) goto cleanup;
+    if (!check_cuda(cudaMemcpyAsync(host_vectorized_output.data(), device_vectorized_output, query_bytes, cudaMemcpyDeviceToHost, stream), "cudaMemcpyAsync(vectorized_output)")) goto cleanup;
+    if (!check_cuda(cudaMemcpyAsync(host_graph_output.data(), device_graph_output, query_bytes, cudaMemcpyDeviceToHost, stream), "cudaMemcpyAsync(graph_output)")) goto cleanup;
     if (!check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize")) goto cleanup;
 
     for (std::size_t index = 0; index < host_output.size(); ++index) {
         if (std::fabs(to_float(host_output[index]) - to_float(host_expected[index])) > tolerance) {
             std::cerr << "Qwen2 GQA mismatch at " << index << ": expected "
                       << to_float(host_expected[index]) << ", got " << to_float(host_output[index]) << '\n';
+            goto cleanup;
+        }
+        if (std::fabs(to_float(host_group_output[index]) - to_float(host_expected[index])) > tolerance) {
+            std::cerr << "Qwen2 group-tiled GQA mismatch at " << index << ": expected "
+                      << to_float(host_expected[index]) << ", got " << to_float(host_group_output[index]) << '\n';
+            goto cleanup;
+        }
+        if (std::fabs(to_float(host_vectorized_output[index]) - to_float(host_expected[index])) > tolerance) {
+            std::cerr << "Qwen2 vectorized GQA mismatch at " << index << ": expected "
+                      << to_float(host_expected[index]) << ", got " << to_float(host_vectorized_output[index]) << '\n';
+            goto cleanup;
+        }
+        if (std::fabs(to_float(host_graph_output[index]) - to_float(host_expected[index])) > tolerance) {
+            std::cerr << "Qwen2 graph GQA mismatch at " << index << ": expected "
+                      << to_float(host_expected[index]) << ", got " << to_float(host_graph_output[index]) << '\n';
             goto cleanup;
         }
     }
@@ -152,6 +247,10 @@ cleanup:
     if (handle != nullptr) kudacuda_destroy(handle);
     if (stream != nullptr) cudaStreamDestroy(stream);
     cudaFree(device_output);
+    cudaFree(device_group_output);
+    cudaFree(device_vectorized_output);
+    cudaFree(device_graph_output);
+    cudaFree(device_kv_len);
     cudaFree(device_value);
     cudaFree(device_key);
     cudaFree(device_query);

@@ -1,0 +1,59 @@
+{
+  "baseline": {
+    "allocated_after_load_mib": 2095.8671875,
+    "generated_tokens": 2,
+    "itl_ms": 61.36608123779297,
+    "peak_vram_mib": 2104.6484375,
+    "status": "completed",
+    "text": "test a =",
+    "token_ids": [
+      1944,
+      264,
+      284
+    ],
+    "tokens_per_second": 14.385667190302671,
+    "total_ms": 139.0272674560547,
+    "ttft_ms": 77.66118621826172,
+    "wall_total_ms": 139.719700000569
+  },
+  "comparison": {
+    "status": "completed",
+    "text_match": true,
+    "token_match": true
+  },
+  "device": "cuda",
+  "dtype": "float16",
+  "gpu": "NVIDIA GeForce RTX 3050 Laptop GPU",
+  "max_new_tokens": 2,
+  "measurement": "CUDA events for prefill/decode kernels; synchronized wall time recorded separately",
+  "model_id": "D:\\AI\\Models\\HuggingFace\\hub\\models--Qwen--Qwen2.5-3B-Instruct\\snapshots\\aa8e72537993ba99e69dfaafa59ed015b17504d1",
+  "prompt": "test",
+  "sidecar": {
+    "allocated_after_load_mib": 2104.16796875,
+    "fused_qkv_requested": true,
+    "fused_qkv_tactic": "qwen2_fused_rmsnorm_qkv_sm86_nf4_v1",
+    "generated_tokens": 2,
+    "itl_ms": 52.155391693115234,
+    "last_qwen2_dispatch_reason": "native",
+    "last_qwen2_fused_qkv_dispatch_reason": null,
+    "native_attention_dispatcher": true,
+    "native_attention_dispatches": 144,
+    "native_fused_qkv_dispatches": 0,
+    "peak_vram_mib": 2104.82421875,
+    "status": "fallback-only",
+    "tactic_name": "qwen2_gqa_decode_sm86_fp16",
+    "tactic_status": "implemented",
+    "text": "test a =",
+    "token_ids": [
+      1944,
+      264,
+      284
+    ],
+    "tokens_per_second": 17.273462968429033,
+    "total_ms": 115.78454208374023,
+    "ttft_ms": 63.629150390625,
+    "wall_total_ms": 116.59689999942202
+  },
+  "status": "completed",
+  "vram_capacity_mib": 4095.5
+}

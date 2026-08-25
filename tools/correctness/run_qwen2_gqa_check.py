@@ -33,6 +33,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--library", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--tactic",
+        default=None,
+        help="Exact Qwen tactic name; defaults to the architecture baseline tactic.",
+    )
     parser.add_argument("--seed", type=int, default=20260824)
     parser.add_argument("--kv-lens", type=int, nargs="+", default=[1, 7, 128, 512])
     args = parser.parse_args(argv)
@@ -53,10 +58,14 @@ def main(argv: list[str] | None = None) -> int:
     torch.manual_seed(args.seed)
     device = torch.device("cuda")
     bridge = None
+    tactic_name = args.tactic
     cases: list[dict[str, Any]] = []
     try:
         bridge = KudaCudaBridge(manifest=args.manifest, lib_path=args.library)
         stream_ptr = int(torch.cuda.current_stream(device).cuda_stream)
+        tactic_name = args.tactic or (
+            f"qwen2_gqa_decode_{str(bridge.manifest['target_arch']).replace('sm_', 'sm')}_fp16"
+        )
         for kv_len in args.kv_lens:
             if kv_len < 1 or kv_len > 512:
                 raise ValueError(f"kv_len must be in 1..512, got {kv_len}")
@@ -72,7 +81,7 @@ def main(argv: list[str] | None = None) -> int:
                 output,
                 kv_len=kv_len,
                 stream_ptr=stream_ptr,
-                tactic_name=f"qwen2_gqa_decode_{str(bridge.manifest['target_arch']).replace('sm_', 'sm')}_fp16",
+                tactic_name=tactic_name,
             )
             torch.cuda.synchronize(device)
             metrics = compare_values(
@@ -103,6 +112,7 @@ def main(argv: list[str] | None = None) -> int:
         "seed": args.seed,
         "cases": cases,
         "native_attention_dispatches": getattr(bridge, "native_attention_dispatches", None),
+        "tactic_name": tactic_name,
         "reference": "torch FP32 score/softmax/value accumulation, FP16 output",
     }
     write_json_evidence(args.output, payload)

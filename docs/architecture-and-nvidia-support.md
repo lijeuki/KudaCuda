@@ -29,7 +29,8 @@ The caller remains responsible for tensor ownership, stream ordering, synchroniz
 | CUDA Runtime API | Device selection, stream-aware launches, error handling, graph capture/replay, kernel launches | Vector-add, RMSNorm, and Qwen2 GQA smoke paths verified |
 | CUDA Driver API / `nvcuda.dll` | Context retention, context selection, module load, function lookup, module unload | Registry implemented; Windows import library is generated from `runtime/nvcuda.def` |
 | CUDA streams | Caller-owned stream is passed through the C ABI without synchronization | Verified with a non-default stream |
-| CUDA Graphs | Capture, instantiate/replay, and destroy the vector-add path | Verified by `kudacuda_vector_add_smoke.exe` |
+| CUDA Graphs | Capture, instantiate/replay, and destroy CUDA-only work; PyTorch `CUDAGraph` owns full-model graph memory pools | Vector-add and multi-launch replay verified; Qwen2 static decode captured/replayed with exact parity on RTX 3050 |
+| bitsandbytes NF4 storage contract | Python bridge validates packed `uint8` NF4 weights, FP32 block scales, blocksize 64, and FP16 projection biases before native dispatch | Real Qwen2.5-3B projection parity validated; fused model path remains correctness-first/experimental |
 | CUBIN/PTX/fatbin | Architecture-specific kernel artifacts | `sm_86` artifact is published; build with `89` for L40S |
 | Ampere Tensor Cores | Planned INT4/INT8 and mixed-precision matrix paths | Not yet implemented |
 | Ada Tensor Cores / FP8 | Planned L40S FP8 E4M3 path | Not yet implemented |
@@ -41,7 +42,9 @@ The exported ABI in `include/kudacuda.h` exposes:
 
 - handle creation, freeze, destruction, and last-error reporting;
 - shape-gated tactic eligibility checks;
-- raw-pointer vector-add, RMSNorm, and Qwen2 GQA decode dispatch;
+- raw-pointer vector-add, RMSNorm, Qwen2 GQA decode, and fused RMSNorm-QKV dispatch;
+- an opt-in Qwen2 NF4 fused RMSNorm-QKV ABI with packed weights, block scales, FP16 biases, and separate Q/K/V outputs;
+- an opt-in fixed-workspace Qwen2 GQA ABI with a device-resident logical KV-length scalar;
 - Qwen2 decode ABI dimensions: batch 1, query length 1, KV length 1..512, 16 query heads, 2 KV heads, head dimension 128, FP16;
 - CUDA graph begin/end/replay operations.
 
@@ -55,18 +58,24 @@ Implemented native tactics:
 - `rmsnorm`, currently an FP32 pilot with independent reference comparison.
 - `qwen2_gqa_decode_sm86_fp16`, an exact decode-only Qwen2.5-3B GQA path on the RTX 3050;
 - `qwen2_gqa_decode_sm89_fp16`, source and manifest prepared for the L40S build, pending an L40S runtime run.
+- `qwen2_fused_rmsnorm_qkv_sm86_nf4_v1`, a correctness-first NF4 fused RMSNorm-QKV path for the exact Qwen2.5-3B projection shapes; it is active only with the explicit fused flag.
+- `qwen2_gqa_decode_sm86_fp16_workspace_v3`, a fixed-capacity two-stage workspace reduction path validated for KV lengths 1, 7, 64, 128, and 512; it is active only with the explicit workspace flag.
+
+The opt-in graph tactics `qwen2_gqa_decode_sm86_fp16_graph_v1` and `qwen2_gqa_decode_sm89_fp16_graph_v1` use a fixed-capacity cache and a device-resident logical KV-length scalar. The Python `StaticDecodeGraphRunner` captures the full Qwen2 decode forward with PyTorch's graph allocator, while KudaCuda supplies the graph-safe native attention launch. Token sampling stays outside the captured graph.
+
+Experimental attention tactics are also compiled for both targets: `group_tiled_v2` and `vectorized_v2`. They pass independent correctness checks, but their current RTX 3050 timings are slower than the active default, so the manifests keep them opt-in.
 
 The Qwen2 adapter leaves projections, RoPE, cache mutation, output projection, prefill, non-zero masks, BF16, batching, and unsupported KV lengths in Transformers. Gemma still uses framework fallback because its GQA4 contract is not implemented.
 
-Not yet implemented:
+Not yet production-ready:
 
 - Gemma GQA attention and KV-cache update;
-- fused residual/RMSNorm, MLP, or quantized matmul;
-- INT4/INT8 weight-only kernels;
+- a tuned fused residual/RMSNorm-QKV implementation, MLP, or production quantized matmul;
+- tiled Tensor-Core INT4/INT8 weight-only kernels; the current NF4 path is a correctness-first scalar-decode pilot;
 - FP8 kernels for L40S;
 - paged KV cache, continuous batching, and a serving scheduler.
 
-Therefore `gqa8_attn` remains `planned`. Qwen2 native dispatch is reported as active only when the DLL exports the Qwen symbol, the exact contract passes, and at least one native call succeeds; a manifest entry alone never activates it.
+Therefore `gqa8_attn` remains `planned`, and the Qwen2 graph, NF4 fused-QKV, and workspace-GQA tactics remain `experimental` pending repeated promotion evidence. Qwen2 native dispatch is reported as active only when the DLL exports the Qwen symbol, the exact contract passes, and at least one native call succeeds; a manifest entry alone never activates it.
 
 ## Architecture portability
 

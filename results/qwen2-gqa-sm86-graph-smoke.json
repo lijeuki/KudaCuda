@@ -1,0 +1,16 @@
+{
+  "project": "KudaCuda",
+  "status": "passed",
+  "target_arch": "sm_86",
+  "gpu": "NVIDIA GeForce RTX 3050 Laptop GPU",
+  "test": "qwen2_gqa_decode_graph_v1",
+  "executable": "artifacts/sm86/kudacuda_cuda_graph_smoke.exe",
+  "native_graph_smoke": "KudaCuda multi-launch CUDA graph replay matched the independent reference",
+  "qwen2_gqa_smoke": "KudaCuda Qwen2 GQA decode output matched the independent FP32 reference",
+  "independent_reference": "FP32 attention score/softmax/value calculation",
+  "model_graph_status": "captured_and_replayed",
+  "model_graph_backend": "torch_cuda_graph",
+  "model_output_parity": "exact_token_and_text_match",
+  "model_evidence": "results/qwen25-3b-sm86-graph-model-final.json",
+  "promotion": "experimental_only_single_short_decode_run"
+}

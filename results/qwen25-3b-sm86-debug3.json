@@ -1,0 +1,67 @@
+{
+  "baseline": {
+    "allocated_after_load_mib": 5994.462890625,
+    "generated_tokens": 2,
+    "itl_ms": 1411.626953125,
+    "peak_vram_mib": 6006.19384765625,
+    "status": "completed",
+    "text": "Say hello in one short sentence. Hello,",
+    "token_ids": [
+      45764,
+      23811,
+      304,
+      825,
+      2805,
+      11652,
+      13,
+      21927,
+      11
+    ],
+    "tokens_per_second": 0.8046959588634554,
+    "total_ms": 2485.4107666015625,
+    "ttft_ms": 1073.7838134765625,
+    "wall_total_ms": 2488.296600058675
+  },
+  "comparison": {
+    "status": "completed",
+    "text_match": true,
+    "token_match": true
+  },
+  "device": "cuda",
+  "dtype": "float16",
+  "gpu": "NVIDIA GeForce RTX 3050 Laptop GPU",
+  "max_new_tokens": 2,
+  "measurement": "CUDA events for prefill/decode kernels; synchronized wall time recorded separately",
+  "model_id": "D:\\AI\\Models\\HuggingFace\\hub\\models--Qwen--Qwen2.5-3B-Instruct\\snapshots\\aa8e72537993ba99e69dfaafa59ed015b17504d1",
+  "prompt": "Say hello in one short sentence.",
+  "sidecar": {
+    "allocated_after_load_mib": 6003.587890625,
+    "generated_tokens": 2,
+    "itl_ms": 1086.3524169921875,
+    "last_qwen2_dispatch_reason": "native",
+    "native_attention_dispatcher": true,
+    "native_attention_dispatches": 72,
+    "peak_vram_mib": 6006.19384765625,
+    "status": "completed",
+    "tactic_name": "qwen2_gqa_decode_sm86_fp16",
+    "tactic_status": "implemented",
+    "text": "Say hello in one short sentence. Hello,",
+    "token_ids": [
+      45764,
+      23811,
+      304,
+      825,
+      2805,
+      11652,
+      13,
+      21927,
+      11
+    ],
+    "tokens_per_second": 1.0447971775681715,
+    "total_ms": 1914.2471313476562,
+    "ttft_ms": 827.8947143554688,
+    "wall_total_ms": 1917.523100040853
+  },
+  "status": "completed",
+  "vram_capacity_mib": 4095.5
+}

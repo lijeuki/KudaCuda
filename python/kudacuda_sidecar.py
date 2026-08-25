@@ -14,11 +14,18 @@ import sys
 from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
+from types import MethodType
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 
 class NativeCudaError(RuntimeError):
     """Raised when the native CUDA sidecar rejects a request or launch."""
+
+
+def _normalize_cuda_handle(value: int) -> int:
+    """Convert PyTorch's signed stream handle representation to uint64."""
+
+    return int(value) & ((1 << 64) - 1)
 
 
 def select_library_name(platform_name: Optional[str] = None) -> str:
@@ -188,6 +195,7 @@ class KudaCudaBridge:
     ) -> None:
         self.manifest = load_manifest(manifest) if isinstance(manifest, (str, Path)) else dict(manifest)
         self.implemented_tactics = frozenset(self.manifest.get("implemented_tactics", ()))
+        self.experimental_tactics = frozenset(self.manifest.get("experimental_tactics", ()))
         self.planned_tactics = frozenset(self.manifest.get("planned_tactics", ()))
         self.contracts = {
             name: TensorContract.from_mapping(contract)
@@ -201,8 +209,20 @@ class KudaCudaBridge:
         self.library_path = Path(lib_path) if lib_path else None
         self.lib = native_lib or self._load_library(lib_path)
         self._configure_abi()
-        self.native_attention_dispatcher = self._qwen2_gqa_decode is not None
+        self.native_attention_dispatcher = any(
+            dispatcher is not None
+            for dispatcher in (
+                self._qwen2_gqa_decode,
+                self._qwen2_gqa_decode_group_tiled,
+                self._qwen2_gqa_decode_vectorized,
+                self._qwen2_gqa_decode_graph,
+            )
+        )
         self.native_attention_dispatches = 0
+        self.native_fused_qkv_dispatches = 0
+        self._graph_kv_len_device: Any = None
+        self._graph_kv_capacity: int | None = None
+        self._graph_workspace: Any = None
         self.engine_handle = self.lib.kudacuda_create(int(device_id))
         if not self.engine_handle:
             raise NativeCudaError("kudacuda_create returned a null handle")
@@ -263,30 +283,87 @@ class KudaCudaBridge:
             ctypes.c_uint64,
         ]
         self.lib.kudacuda_rmsnorm.restype = ctypes.c_int
-        self._qwen2_gqa_decode = getattr(self.lib, "kudacuda_qwen2_gqa_decode", None)
-        if self._qwen2_gqa_decode is not None:
-            self._qwen2_gqa_decode.argtypes = [
+        qwen_abi = [
+            ctypes.c_void_p,
+            ctypes.c_uint64,
+            ctypes.c_uint64,
+            ctypes.c_uint64,
+            ctypes.c_uint64,
+            ctypes.c_int64,
+            ctypes.c_int64,
+            ctypes.c_int64,
+            ctypes.c_int64,
+            ctypes.c_int64,
+            ctypes.c_int64,
+            ctypes.c_float,
+            ctypes.c_uint64,
+        ]
+
+        def configure_qwen_symbol(symbol_name: str) -> Any:
+            symbol = getattr(self.lib, symbol_name, None)
+            if symbol is not None:
+                symbol.argtypes = qwen_abi
+                symbol.restype = ctypes.c_int
+            return symbol
+
+        self._qwen2_gqa_decode = configure_qwen_symbol("kudacuda_qwen2_gqa_decode")
+        self._qwen2_gqa_decode_group_tiled = configure_qwen_symbol(
+            "kudacuda_qwen2_gqa_decode_group_tiled"
+        )
+        self._qwen2_gqa_decode_vectorized = configure_qwen_symbol(
+            "kudacuda_qwen2_gqa_decode_vectorized"
+        )
+        self._qwen2_gqa_decode_graph = getattr(self.lib, "kudacuda_qwen2_gqa_decode_graph", None)
+        if self._qwen2_gqa_decode_graph is not None:
+            self._qwen2_gqa_decode_graph.argtypes = qwen_abi[:-1] + [ctypes.c_uint64, ctypes.c_uint64]
+            self._qwen2_gqa_decode_graph.restype = ctypes.c_int
+        self._qwen2_gqa_decode_workspace = getattr(
+            self.lib, "kudacuda_qwen2_gqa_decode_workspace_v3", None
+        )
+        if self._qwen2_gqa_decode_workspace is not None:
+            self._qwen2_gqa_decode_workspace.argtypes = (
+                [ctypes.c_void_p]
+                + [ctypes.c_uint64] * 6
+                + [ctypes.c_int64] * 6
+                + [ctypes.c_float, ctypes.c_uint64]
+            )
+            self._qwen2_gqa_decode_workspace.restype = ctypes.c_int
+        self._fused_rmsnorm_qkv = getattr(self.lib, "kudacuda_fused_rmsnorm_qkv", None)
+        if self._fused_rmsnorm_qkv is not None:
+            self._fused_rmsnorm_qkv.argtypes = [
                 ctypes.c_void_p,
                 ctypes.c_uint64,
                 ctypes.c_uint64,
                 ctypes.c_uint64,
                 ctypes.c_uint64,
-                ctypes.c_int64,
-                ctypes.c_int64,
-                ctypes.c_int64,
-                ctypes.c_int64,
+                ctypes.c_uint64,
                 ctypes.c_int64,
                 ctypes.c_int64,
                 ctypes.c_float,
                 ctypes.c_uint64,
             ]
-            self._qwen2_gqa_decode.restype = ctypes.c_int
+            self._fused_rmsnorm_qkv.restype = ctypes.c_int
+        self._qwen2_fused_rmsnorm_qkv_nf4 = getattr(
+            self.lib,
+            "kudacuda_qwen2_fused_rmsnorm_qkv_nf4",
+            None,
+        )
+        if self._qwen2_fused_rmsnorm_qkv_nf4 is not None:
+            self._qwen2_fused_rmsnorm_qkv_nf4.argtypes = (
+                [ctypes.c_void_p]
+                + [ctypes.c_uint64] * 14
+                + [ctypes.c_int64] * 5
+                + [ctypes.c_float, ctypes.c_uint64]
+            )
+            self._qwen2_fused_rmsnorm_qkv_nf4.restype = ctypes.c_int
         self.lib.kudacuda_begin_capture.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
         self.lib.kudacuda_begin_capture.restype = ctypes.c_int
         self.lib.kudacuda_end_capture.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
         self.lib.kudacuda_end_capture.restype = ctypes.c_int
         self.lib.kudacuda_replay_graph.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
         self.lib.kudacuda_replay_graph.restype = ctypes.c_int
+        self.lib.kudacuda_reset_graph.argtypes = [ctypes.c_void_p]
+        self.lib.kudacuda_reset_graph.restype = ctypes.c_int
         self.lib.kudacuda_last_error.argtypes = [ctypes.c_void_p]
         self.lib.kudacuda_last_error.restype = ctypes.c_char_p
         self.lib.kudacuda_destroy.argtypes = [ctypes.c_void_p]
@@ -332,13 +409,28 @@ class KudaCudaBridge:
         )
 
     def tactic_status(self, tactic_name: str) -> str:
-        if tactic_name.startswith("qwen2_gqa_decode_") and not self.native_attention_dispatcher:
+        if tactic_name.startswith("qwen2_gqa_decode_") and self._qwen_symbol(tactic_name) is None:
+            return "unavailable"
+        if tactic_name.startswith("qwen2_fused_rmsnorm_qkv_") and self._qwen2_fused_rmsnorm_qkv_nf4 is None:
             return "unavailable"
         if tactic_name in self.implemented_tactics:
             return "implemented"
+        if tactic_name in self.experimental_tactics:
+            return "experimental"
         if tactic_name in self.planned_tactics:
             return "planned"
         return "unknown"
+
+    def _qwen_symbol(self, tactic_name: str) -> Any:
+        if "graph_v1" in tactic_name:
+            return self._qwen2_gqa_decode_graph
+        if "group_tiled_v2" in tactic_name:
+            return self._qwen2_gqa_decode_group_tiled
+        if "vectorized_v2" in tactic_name:
+            return self._qwen2_gqa_decode_vectorized
+        if "workspace_v3" in tactic_name:
+            return self._qwen2_gqa_decode_workspace
+        return self._qwen2_gqa_decode
 
     @staticmethod
     def _tensor_pointer(tensor: Any, label: str) -> int:
@@ -365,9 +457,7 @@ class KudaCudaBridge:
         sizes = [int(tensor.numel()) for _, tensor in tensors]
         if len(set(sizes)) != 1:
             raise ValueError(f"vector_add tensors must have equal sizes, got {sizes}")
-        stream = int(stream_ptr)
-        if stream < 0:
-            raise ValueError("stream_ptr must be a non-negative CUDA stream handle")
+        stream = _normalize_cuda_handle(stream_ptr)
         status = self.lib.kudacuda_vector_add(
             self.engine_handle,
             self._tensor_pointer(a, "a"),
@@ -413,7 +503,7 @@ class KudaCudaBridge:
             input_shape[0],
             input_shape[1],
             float(epsilon),
-            int(stream_ptr),
+            _normalize_cuda_handle(stream_ptr),
         )
         self._raise_if_failed(status, "kudacuda_rmsnorm")
 
@@ -430,9 +520,17 @@ class KudaCudaBridge:
     ) -> None:
         if self._closed:
             raise NativeCudaError("KudaCuda bridge is closed")
+        if "graph_v1" in tactic_name:
+            raise NativeCudaError("graph tactic requires an active static decode graph context")
         contract = self.qwen_contracts.get(tactic_name)
-        if tactic_name not in self.implemented_tactics or contract is None:
+        if (
+            tactic_name not in self.implemented_tactics
+            and tactic_name not in self.experimental_tactics
+        ) or contract is None:
             raise NativeCudaError(f"{tactic_name} is not implemented by this manifest")
+        native_dispatch = self._qwen_symbol(tactic_name)
+        if native_dispatch is None:
+            raise NativeCudaError(f"native library does not export the {tactic_name} dispatcher")
         if not contract.matches(1, 1, kv_len):
             raise ValueError(f"Qwen2 GQA decode contract does not accept kv_len={kv_len}")
         expected_shapes = (
@@ -448,9 +546,7 @@ class KudaCudaBridge:
         ):
             if not contract.matches_tensor(tensor, shape):
                 raise ValueError(f"{label} does not satisfy the Qwen2 GQA CUDA contract")
-        if int(stream_ptr) < 0:
-            raise ValueError("stream_ptr must be a non-negative CUDA stream handle")
-        status = self._qwen2_gqa_decode(
+        status = native_dispatch(
             self.engine_handle,
             self._tensor_pointer(query, "query"),
             self._tensor_pointer(key_cache, "key_cache"),
@@ -463,9 +559,150 @@ class KudaCudaBridge:
             contract.kv_heads,
             contract.head_dim,
             1.0 / math.sqrt(contract.head_dim),
-            int(stream_ptr),
+            _normalize_cuda_handle(stream_ptr),
         )
-        self._raise_if_failed(status, "kudacuda_qwen2_gqa_decode")
+        self._raise_if_failed(status, tactic_name)
+        self.native_attention_dispatches += 1
+
+    def configure_qwen2_graph_dispatch(
+        self,
+        *,
+        kv_len_device: Any,
+        kv_capacity: int,
+        workspace: Any = None,
+    ) -> None:
+        if self._qwen2_gqa_decode_graph is None:
+            raise NativeCudaError("native library does not export kudacuda_qwen2_gqa_decode_graph")
+        if int(kv_capacity) < 1 or int(kv_capacity) > 512:
+            raise ValueError("kv_capacity must be in the range 1..512")
+        self._graph_kv_len_device = kv_len_device
+        self._graph_kv_capacity = int(kv_capacity)
+        self._graph_workspace = workspace
+
+    def clear_qwen2_graph_dispatch(self) -> None:
+        self._graph_kv_len_device = None
+        self._graph_kv_capacity = None
+        self._graph_workspace = None
+
+    def dispatch_qwen2_gqa_decode_workspace(
+        self,
+        query: Any,
+        key_cache: Any,
+        value_cache: Any,
+        output: Any,
+        *,
+        kv_capacity: int,
+        kv_len_device: Any,
+        workspace: Any,
+        stream_ptr: int,
+        tactic_name: str = "qwen2_gqa_decode_sm86_fp16_workspace_v3",
+    ) -> None:
+        if self._closed:
+            raise NativeCudaError("KudaCuda bridge is closed")
+        contract = self.qwen_contracts.get(tactic_name)
+        if contract is None or self._qwen2_gqa_decode_workspace is None:
+            raise NativeCudaError(f"{tactic_name} workspace contract or dispatcher is unavailable")
+        if tactic_name not in self.implemented_tactics and tactic_name not in self.experimental_tactics:
+            raise NativeCudaError(f"{tactic_name} is not enabled by this manifest")
+        if int(kv_capacity) != 512:
+            raise ValueError("workspace GQA requires kv_capacity=512")
+        expected_shapes = (
+            (1, contract.query_heads, 1, contract.head_dim),
+            (1, contract.kv_heads, int(kv_capacity), contract.head_dim),
+            (1, contract.kv_heads, int(kv_capacity), contract.head_dim),
+            (1, contract.query_heads, 1, contract.head_dim),
+        )
+        for label, tensor, shape in zip(
+            ("query", "key_cache", "value_cache", "output"),
+            (query, key_cache, value_cache, output),
+            expected_shapes,
+        ):
+            if not contract.matches_tensor(tensor, shape):
+                raise ValueError(f"{label} does not satisfy the Qwen2 workspace CUDA contract")
+        if not self._tensor_contract_matches(kv_len_device, dtype="int32", rank=1):
+            raise ValueError("kv_len_device does not satisfy the Qwen2 workspace CUDA contract")
+        if tuple(int(value) for value in kv_len_device.shape) != (1,):
+            raise ValueError("kv_len_device must have shape (1,)")
+        expected_workspace = contract.query_heads * 8 * (2 + contract.head_dim)
+        if not self._tensor_contract_matches(workspace, dtype="float32", rank=1):
+            raise ValueError("workspace does not satisfy the Qwen2 workspace CUDA contract")
+        if int(workspace.numel()) < expected_workspace:
+            raise ValueError(f"workspace must contain at least {expected_workspace} float32 values")
+        status = self._qwen2_gqa_decode_workspace(
+            self.engine_handle,
+            self._tensor_pointer(query, "query"),
+            self._tensor_pointer(key_cache, "key_cache"),
+            self._tensor_pointer(value_cache, "value_cache"),
+            self._tensor_pointer(output, "output"),
+            self._tensor_pointer(workspace, "workspace"),
+            self._tensor_pointer(kv_len_device, "kv_len_device"),
+            1,
+            1,
+            int(kv_capacity),
+            contract.query_heads,
+            contract.kv_heads,
+            contract.head_dim,
+            1.0 / math.sqrt(contract.head_dim),
+            _normalize_cuda_handle(stream_ptr),
+        )
+        self._raise_if_failed(status, tactic_name)
+        self.native_attention_dispatches += 1
+
+    def dispatch_qwen2_gqa_decode_graph(
+        self,
+        query: Any,
+        key_cache: Any,
+        value_cache: Any,
+        output: Any,
+        *,
+        kv_capacity: int,
+        kv_len_device: Any,
+        stream_ptr: int,
+        tactic_name: str = "qwen2_gqa_decode_sm86_fp16_graph_v1",
+    ) -> None:
+        if self._closed:
+            raise NativeCudaError("KudaCuda bridge is closed")
+        contract = self.qwen_contracts.get(tactic_name)
+        if contract is None or self._qwen2_gqa_decode_graph is None:
+            raise NativeCudaError(f"{tactic_name} graph contract or dispatcher is unavailable")
+        expected_shapes = (
+            (1, contract.query_heads, 1, contract.head_dim),
+            (1, contract.kv_heads, int(kv_capacity), contract.head_dim),
+            (1, contract.kv_heads, int(kv_capacity), contract.head_dim),
+            (1, contract.query_heads, 1, contract.head_dim),
+        )
+        for label, tensor, shape in zip(
+            ("query", "key_cache", "value_cache", "output"),
+            (query, key_cache, value_cache, output),
+            expected_shapes,
+        ):
+            if not contract.matches_tensor(tensor, shape):
+                raise ValueError(f"{label} does not satisfy the Qwen2 graph CUDA contract")
+        if not self._tensor_contract_matches(kv_len_device, dtype="int32", rank=1):
+            raise ValueError("kv_len_device does not satisfy the Qwen2 graph CUDA contract")
+        if tuple(int(value) for value in kv_len_device.shape) != (1,):
+            raise ValueError("kv_len_device must have shape (1,)")
+        native_args = (
+            self.engine_handle,
+            self._tensor_pointer(query, "query"),
+            self._tensor_pointer(key_cache, "key_cache"),
+            self._tensor_pointer(value_cache, "value_cache"),
+            self._tensor_pointer(output, "output"),
+            1,
+            1,
+            int(kv_capacity),
+            contract.query_heads,
+            contract.kv_heads,
+            contract.head_dim,
+            1.0 / math.sqrt(contract.head_dim),
+            self._tensor_pointer(kv_len_device, "kv_len_device"),
+            _normalize_cuda_handle(stream_ptr),
+        )
+        try:
+            status = self._qwen2_gqa_decode_graph(*native_args)
+        except OverflowError as error:
+            raise NativeCudaError(f"graph dispatcher argument conversion failed: {native_args}") from error
+        self._raise_if_failed(status, tactic_name)
         self.native_attention_dispatches += 1
 
     def dispatch_qwen2_attention(
@@ -524,9 +761,17 @@ class KudaCudaBridge:
 
             input_shape = hidden_states.shape[:-1]
             hidden_shape = (*input_shape, -1, module.head_dim)
-            query_states = module.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-            key_states = module.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-            value_states = module.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+            prefused_qkv = getattr(module, "_kudacuda_prefused_qkv", None)
+            if prefused_qkv is not None:
+                query_flat, key_flat, value_flat = prefused_qkv
+                query_states = query_flat.view(hidden_shape).transpose(1, 2)
+                kv_shape = (*input_shape, -1, module.head_dim)
+                key_states = key_flat.view(kv_shape).transpose(1, 2)
+                value_states = value_flat.view(kv_shape).transpose(1, 2)
+            else:
+                query_states = module.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+                key_states = module.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+                value_states = module.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
             cos, sin = position_embeddings
             query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
@@ -552,7 +797,17 @@ class KudaCudaBridge:
 
             if key_states.dim() != 4 or value_states.shape != key_states.shape:
                 return fallback(f"cache_shape:{tuple(key_states.shape)}:{tuple(value_states.shape)}")
+            graph_mode = (
+                ("graph_v1" in tactic_name or "workspace_v3" in tactic_name)
+                and self._graph_kv_len_device is not None
+                and self._graph_kv_capacity is not None
+            )
             kv_len = int(key_states.shape[-2])
+            if graph_mode:
+                if kv_len != self._graph_kv_capacity:
+                    return fallback(f"graph_cache_capacity:{kv_len}:{self._graph_kv_capacity}")
+                if getattr(module, "sliding_window", None) is not None:
+                    return fallback("graph_sliding_window_unsupported")
 
             def eager_fallback(reason: str) -> Any:
                 self.last_qwen2_dispatch_reason = reason
@@ -570,12 +825,16 @@ class KudaCudaBridge:
                 context = context.transpose(1, 2).reshape(*input_shape, -1).contiguous()
                 return module.o_proj(context), None
 
-            if attention_mask is not None:
+            if attention_mask is not None and not graph_mode:
                 if attention_mask.dim() != 4 or int(attention_mask.shape[-1]) != kv_len:
                     return fallback(f"attention_mask_shape:{tuple(attention_mask.shape)}:kv={kv_len}")
                 if not bool(torch.all(attention_mask == 0)):
                     return eager_fallback("framework_fallback:attention_mask_values")
-            if not bool(query_states.is_contiguous()) or not bool(key_states.is_contiguous()):
+            if graph_mode:
+                query_states = query_states.contiguous()
+                key_states = key_states.contiguous()
+                value_states = value_states.contiguous()
+            elif not bool(query_states.is_contiguous()) or not bool(key_states.is_contiguous()):
                 return eager_fallback(
                     f"non_contiguous:q={query_states.stride()}:k={key_states.stride()}"
                 )
@@ -583,16 +842,44 @@ class KudaCudaBridge:
             output = torch.empty_like(query_states)
             stream_ptr = int(torch.cuda.current_stream(hidden_states.device).cuda_stream)
             try:
-                self.dispatch_qwen2_gqa_decode(
-                    query_states,
-                    key_states,
-                    value_states,
-                    output,
-                    kv_len=kv_len,
-                    stream_ptr=stream_ptr,
-                    tactic_name=tactic_name,
-                )
+                if "workspace_v3" in tactic_name:
+                    if self._graph_workspace is None:
+                        raise NativeCudaError("workspace GQA tactic requires a configured workspace")
+                    self.dispatch_qwen2_gqa_decode_workspace(
+                        query_states,
+                        key_states,
+                        value_states,
+                        output,
+                        kv_capacity=int(self._graph_kv_capacity),
+                        kv_len_device=self._graph_kv_len_device,
+                        workspace=self._graph_workspace,
+                        stream_ptr=stream_ptr,
+                        tactic_name=tactic_name,
+                    )
+                elif graph_mode:
+                    self.dispatch_qwen2_gqa_decode_graph(
+                        query_states,
+                        key_states,
+                        value_states,
+                        output,
+                        kv_capacity=int(self._graph_kv_capacity),
+                        kv_len_device=self._graph_kv_len_device,
+                        stream_ptr=stream_ptr,
+                        tactic_name=tactic_name,
+                    )
+                else:
+                    self.dispatch_qwen2_gqa_decode(
+                        query_states,
+                        key_states,
+                        value_states,
+                        output,
+                        kv_len=kv_len,
+                        stream_ptr=stream_ptr,
+                        tactic_name=tactic_name,
+                    )
             except Exception as error:
+                if graph_mode:
+                    raise
                 return eager_fallback(
                     f"framework_fallback:native_exception:{type(error).__name__}:{error}"
                 )
@@ -600,6 +887,8 @@ class KudaCudaBridge:
             self.last_qwen2_dispatch_reason = "native"
             return module.o_proj(attn_output), None
         except Exception as error:
+            if "graph_mode" in locals() and graph_mode:
+                raise
             if cache_updated and "query_states" in locals() and "key_states" in locals():
                 try:
                     return eager_fallback(
@@ -608,6 +897,206 @@ class KudaCudaBridge:
                 except Exception:
                     pass
             return fallback(f"exception:{type(error).__name__}:{error}")
+
+    def fused_rmsnorm_qkv(
+        self,
+        input_tensor: Any,
+        norm_weight: Any,
+        qkv_weight: Any,
+        bias: Any,
+        output: Any,
+        *,
+        epsilon: float = 1.0e-5,
+        stream_ptr: int,
+    ) -> None:
+        """Launch the FP16 dense-weight fused RMSNorm-QKV foundation kernel."""
+
+        if self._closed:
+            raise NativeCudaError("KudaCuda bridge is closed")
+        if self._fused_rmsnorm_qkv is None:
+            raise NativeCudaError("native library does not export kudacuda_fused_rmsnorm_qkv")
+        tensors = (
+            ("input", input_tensor, 2),
+            ("norm_weight", norm_weight, 1),
+            ("qkv_weight", qkv_weight, 2),
+            ("bias", bias, 1),
+            ("output", output, 2),
+        )
+        for label, tensor, rank in tensors:
+            if not self._tensor_contract_matches(tensor, dtype="float16", rank=rank):
+                raise ValueError(f"{label} does not satisfy the fused RMSNorm-QKV CUDA contract")
+        input_shape = tuple(int(value) for value in input_tensor.shape)
+        norm_shape = tuple(int(value) for value in norm_weight.shape)
+        qkv_shape = tuple(int(value) for value in qkv_weight.shape)
+        bias_shape = tuple(int(value) for value in bias.shape)
+        output_shape = tuple(int(value) for value in output.shape)
+        rows, hidden = input_shape
+        if norm_shape != (hidden,):
+            raise ValueError("norm_weight must match the input hidden dimension")
+        if qkv_shape != (hidden * 3, hidden):
+            raise ValueError("qkv_weight must have shape (3 * hidden, hidden)")
+        if bias_shape != (hidden * 3,):
+            raise ValueError("bias must have shape (3 * hidden,)")
+        if output_shape != (rows, hidden * 3):
+            raise ValueError("output must have shape (rows, 3 * hidden)")
+        if epsilon <= 0.0:
+            raise ValueError("epsilon must be positive")
+        status = self._fused_rmsnorm_qkv(
+            self.engine_handle,
+            self._tensor_pointer(input_tensor, "input"),
+            self._tensor_pointer(norm_weight, "norm_weight"),
+            self._tensor_pointer(qkv_weight, "qkv_weight"),
+            self._tensor_pointer(bias, "bias"),
+            self._tensor_pointer(output, "output"),
+            rows,
+            hidden,
+            float(epsilon),
+            _normalize_cuda_handle(stream_ptr),
+        )
+        self._raise_if_failed(status, "kudacuda_fused_rmsnorm_qkv")
+
+    @staticmethod
+    def _validate_nf4_weight(
+        weight: Any,
+        absmax: Any,
+        *,
+        expected_shape: tuple[int, int],
+        label: str,
+    ) -> int:
+        state = getattr(weight, "quant_state", None)
+        if state is None:
+            raise ValueError(f"{label} is missing quant_state")
+        if str(getattr(state, "quant_type", "")) != "nf4":
+            raise ValueError(f"{label} quant_type must be nf4")
+        blocksize = int(getattr(state, "blocksize", 0))
+        if blocksize != 64:
+            raise ValueError(f"{label} blocksize must be 64")
+        if bool(getattr(state, "nested", False)):
+            raise ValueError(f"{label} nested quantization is unsupported")
+        logical_shape = tuple(int(value) for value in getattr(state, "shape", ()))
+        if logical_shape != expected_shape:
+            raise ValueError(f"{label} logical shape must be {expected_shape}")
+        if not KudaCudaBridge._tensor_contract_matches(weight, dtype="uint8", rank=2):
+            raise ValueError(f"{label} packed storage must be contiguous CUDA uint8")
+        packed_shape = tuple(int(value) for value in weight.shape)
+        packed_count = (expected_shape[0] * expected_shape[1] + 1) // 2
+        if packed_shape != (packed_count, 1):
+            raise ValueError(f"{label} packed shape must be {(packed_count, 1)}")
+        if not KudaCudaBridge._tensor_contract_matches(absmax, dtype="float32", rank=1):
+            raise ValueError(f"{label} absmax must be contiguous CUDA float32")
+        expected_absmax = (expected_shape[0] * expected_shape[1] + blocksize - 1) // blocksize
+        if int(absmax.numel()) != expected_absmax:
+            raise ValueError(f"{label} absmax must contain {expected_absmax} blocks")
+        return blocksize
+
+    def dispatch_qwen2_fused_rmsnorm_qkv_nf4(
+        self,
+        input_tensor: Any,
+        norm_weight: Any,
+        q_weight: Any,
+        q_absmax: Any,
+        q_bias: Any,
+        k_weight: Any,
+        k_absmax: Any,
+        k_bias: Any,
+        v_weight: Any,
+        v_absmax: Any,
+        v_bias: Any,
+        q_output: Any,
+        k_output: Any,
+        v_output: Any,
+        *,
+        epsilon: float = 1.0e-5,
+        stream_ptr: int,
+        tactic_name: str = "qwen2_fused_rmsnorm_qkv_sm86_nf4_v1",
+    ) -> None:
+        """Launch the exact Qwen2.5-3B non-nested NF4 fused QKV contract."""
+
+        if self._closed:
+            raise NativeCudaError("KudaCuda bridge is closed")
+        if self._qwen2_fused_rmsnorm_qkv_nf4 is None:
+            raise NativeCudaError(
+                "native library does not export kudacuda_qwen2_fused_rmsnorm_qkv_nf4"
+            )
+        if tactic_name not in self.implemented_tactics and tactic_name not in self.experimental_tactics:
+            raise NativeCudaError(f"{tactic_name} is not enabled by this manifest")
+        if not self._tensor_contract_matches(input_tensor, dtype="float16", rank=2):
+            raise ValueError("input must be contiguous CUDA float16 rank-2")
+        if not self._tensor_contract_matches(norm_weight, dtype="float16", rank=1):
+            raise ValueError("norm_weight must be contiguous CUDA float16 rank-1")
+        input_shape = tuple(int(value) for value in input_tensor.shape)
+        norm_shape = tuple(int(value) for value in norm_weight.shape)
+        rows, hidden = input_shape
+        q_shape = (2048, 2048)
+        kv_shape = (256, 2048)
+        if input_shape != (1, 2048) or norm_shape != (2048,):
+            raise ValueError("NF4 fused QKV requires input (1, 2048) and norm_weight (2048,)")
+        q_blocksize = self._validate_nf4_weight(
+            q_weight,
+            q_absmax,
+            expected_shape=q_shape,
+            label="q_weight",
+        )
+        for label, bias, expected_shape in (
+            ("q_bias", q_bias, (2048,)),
+            ("k_bias", k_bias, (256,)),
+            ("v_bias", v_bias, (256,)),
+        ):
+            if not self._tensor_contract_matches(bias, dtype="float16", rank=1):
+                raise ValueError(f"{label} must be contiguous CUDA float16 rank-1")
+            if tuple(int(value) for value in bias.shape) != expected_shape:
+                raise ValueError(f"{label} must have shape {expected_shape}")
+        k_blocksize = self._validate_nf4_weight(
+            k_weight,
+            k_absmax,
+            expected_shape=kv_shape,
+            label="k_weight",
+        )
+        v_blocksize = self._validate_nf4_weight(
+            v_weight,
+            v_absmax,
+            expected_shape=kv_shape,
+            label="v_weight",
+        )
+        if (q_blocksize, k_blocksize, v_blocksize) != (64, 64, 64):
+            raise ValueError("all NF4 projection block sizes must be 64")
+        for label, tensor, shape in (
+            ("q_output", q_output, (rows, 2048)),
+            ("k_output", k_output, (rows, 256)),
+            ("v_output", v_output, (rows, 256)),
+        ):
+            if not self._tensor_contract_matches(tensor, dtype="float16", rank=2):
+                raise ValueError(f"{label} must be contiguous CUDA float16 rank-2")
+            if tuple(int(value) for value in tensor.shape) != shape:
+                raise ValueError(f"{label} must have shape {shape}")
+        if epsilon <= 0.0:
+            raise ValueError("epsilon must be positive")
+        status = self._qwen2_fused_rmsnorm_qkv_nf4(
+            self.engine_handle,
+            self._tensor_pointer(input_tensor, "input"),
+            self._tensor_pointer(norm_weight, "norm_weight"),
+            self._tensor_pointer(q_weight, "q_weight"),
+            self._tensor_pointer(q_absmax, "q_absmax"),
+            self._tensor_pointer(q_bias, "q_bias"),
+            self._tensor_pointer(k_weight, "k_weight"),
+            self._tensor_pointer(k_absmax, "k_absmax"),
+            self._tensor_pointer(k_bias, "k_bias"),
+            self._tensor_pointer(v_weight, "v_weight"),
+            self._tensor_pointer(v_absmax, "v_absmax"),
+            self._tensor_pointer(v_bias, "v_bias"),
+            self._tensor_pointer(q_output, "q_output"),
+            self._tensor_pointer(k_output, "k_output"),
+            self._tensor_pointer(v_output, "v_output"),
+            rows,
+            hidden,
+            2048,
+            256,
+            64,
+            float(epsilon),
+            _normalize_cuda_handle(stream_ptr),
+        )
+        self._raise_if_failed(status, tactic_name)
+        self.native_fused_qkv_dispatches += 1
 
     @staticmethod
     def _tensor_contract_matches(tensor: Any, *, dtype: Optional[str], rank: int) -> bool:
@@ -625,20 +1114,26 @@ class KudaCudaBridge:
 
     def begin_capture(self, *, stream_ptr: int) -> None:
         self._raise_if_failed(
-            self.lib.kudacuda_begin_capture(self.engine_handle, int(stream_ptr)),
+            self.lib.kudacuda_begin_capture(self.engine_handle, _normalize_cuda_handle(stream_ptr)),
             "kudacuda_begin_capture",
         )
 
     def end_capture(self, *, stream_ptr: int) -> None:
         self._raise_if_failed(
-            self.lib.kudacuda_end_capture(self.engine_handle, int(stream_ptr)),
+            self.lib.kudacuda_end_capture(self.engine_handle, _normalize_cuda_handle(stream_ptr)),
             "kudacuda_end_capture",
         )
 
     def replay_graph(self, *, stream_ptr: int) -> None:
         self._raise_if_failed(
-            self.lib.kudacuda_replay_graph(self.engine_handle, int(stream_ptr)),
+            self.lib.kudacuda_replay_graph(self.engine_handle, _normalize_cuda_handle(stream_ptr)),
             "kudacuda_replay_graph",
+        )
+
+    def reset_graph(self) -> None:
+        self._raise_if_failed(
+            self.lib.kudacuda_reset_graph(self.engine_handle),
+            "kudacuda_reset_graph",
         )
 
     def shutdown(self) -> None:
@@ -749,5 +1244,209 @@ def patch_qwen2_attention(
         if not restored:
             attention_cls.forward = original_forward
             restored = True
+
+    return unpatch
+
+
+def prepare_qwen2_fused_qkv(
+    model: Any,
+    *,
+    torch_module: Any = None,
+) -> None:
+    """Allocate one stable FP16 Q/K/V workspace per Qwen2 decoder layer.
+
+    The buffers are created before CUDA Graph capture. The fused decoder hook
+    only writes into these buffers during decode, so graph replay observes the
+    same tensor addresses on every iteration.
+    """
+
+    if torch_module is None:
+        import torch as torch_module
+
+    layers = getattr(getattr(model, "model", None), "layers", None)
+    if layers is None:
+        raise ValueError("Qwen2 model does not expose model.layers")
+    for layer in layers:
+        attention = getattr(layer, "self_attn", None)
+        norm = getattr(layer, "input_layernorm", None)
+        norm_weight = getattr(norm, "weight", None)
+        if attention is None or norm_weight is None:
+            raise ValueError("Qwen2 decoder layer is missing self_attn or input_layernorm")
+        device = getattr(norm_weight, "device", None)
+        dtype = getattr(norm_weight, "dtype", None)
+        if device is None or dtype is None:
+            raise ValueError("Qwen2 input layernorm weight has no device/dtype")
+        attention._kudacuda_fused_qkv_state = {
+            "query": torch_module.empty((1, 2048), device=device, dtype=dtype),
+            "key": torch_module.empty((1, 256), device=device, dtype=dtype),
+            "value": torch_module.empty((1, 256), device=device, dtype=dtype),
+        }
+
+
+def patch_qwen2_fused_qkv(
+    model: Any,
+    bridge: Any,
+    *,
+    tactic_name: str = "qwen2_fused_rmsnorm_qkv_sm86_nf4_v1",
+    attention_tactic_name: str = "qwen2_gqa_decode_sm86_fp16",
+    prepare: bool = True,
+    torch_module: Any = None,
+    attention_cls: Any = None,
+) -> Callable[[], None]:
+    """Patch Qwen2 decoder layers to launch the native NF4 fused QKV path.
+
+    The successful path performs the input RMSNorm and all three NF4
+    projections natively, then reuses the existing attention hook for RoPE,
+    cache update, GQA, and output projection. Any unsupported shape, dtype, or
+    native error clears the temporary marker and calls the original decoder
+    layer unchanged.
+    """
+
+    layers = getattr(getattr(model, "model", None), "layers", None)
+    if layers is None or not list(layers):
+        raise ValueError("Qwen2 model does not expose decoder layers")
+    layers = list(layers)
+    if attention_cls is None:
+        attention_cls = type(layers[0].self_attn)
+    if prepare:
+        prepare_qwen2_fused_qkv(model, torch_module=torch_module)
+
+    attention_unpatch = patch_qwen2_attention(
+        bridge,
+        attention_cls=attention_cls,
+        tactic_name=attention_tactic_name,
+    )
+    originals: list[tuple[Any, Any, Any, Any]] = []
+    marker = object()
+
+    for layer in layers:
+        attention = layer.self_attn
+        original_forward = layer.forward
+        previous_state = getattr(attention, "_kudacuda_fused_qkv_state", marker)
+        previous_prefused = getattr(attention, "_kudacuda_prefused_qkv", marker)
+        originals.append((layer, original_forward, previous_state, previous_prefused))
+
+        def fused_forward(
+            self: Any,
+            hidden_states: Any,
+            *args: Any,
+            _layer: Any = layer,
+            _attention: Any = attention,
+            _original_forward: Any = original_forward,
+            **kwargs: Any,
+        ) -> Any:
+            bridge.native_fused_qkv_hook_calls = int(
+                getattr(bridge, "native_fused_qkv_hook_calls", 0)
+            ) + 1
+            shape = tuple(int(value) for value in getattr(hidden_states, "shape", ()))
+            if shape != (1, 1, 2048):
+                if int(getattr(bridge, "native_fused_qkv_dispatches", 0)) == 0:
+                    bridge.last_qwen2_fused_qkv_dispatch_reason = f"shape:{shape}"
+                return _original_forward(hidden_states, *args, **kwargs)
+            state = getattr(_attention, "_kudacuda_fused_qkv_state", None)
+            if not isinstance(state, dict) or not all(key in state for key in ("query", "key", "value")):
+                bridge.last_qwen2_fused_qkv_dispatch_reason = "missing_workspace"
+                return _original_forward(hidden_states, *args, **kwargs)
+
+            prefused_marker = getattr(_attention, "_kudacuda_prefused_qkv", marker)
+            try:
+                input_tensor = hidden_states.reshape(1, 2048)
+                if not bool(input_tensor.is_contiguous()):
+                    bridge.last_qwen2_fused_qkv_dispatch_reason = "non_contiguous_input"
+                    return _original_forward(hidden_states, *args, **kwargs)
+                norm = _layer.input_layernorm
+                norm_weight = norm.weight
+                q_weight = _attention.q_proj.weight
+                k_weight = _attention.k_proj.weight
+                v_weight = _attention.v_proj.weight
+                q_state = getattr(q_weight, "quant_state", None)
+                k_state = getattr(k_weight, "quant_state", None)
+                v_state = getattr(v_weight, "quant_state", None)
+                if q_state is None or k_state is None or v_state is None:
+                    bridge.last_qwen2_fused_qkv_dispatch_reason = "missing_quant_state"
+                    return _original_forward(hidden_states, *args, **kwargs)
+                q_bias = getattr(_attention.q_proj, "bias", None)
+                k_bias = getattr(_attention.k_proj, "bias", None)
+                v_bias = getattr(_attention.v_proj, "bias", None)
+                if q_bias is None or k_bias is None or v_bias is None:
+                    bridge.last_qwen2_fused_qkv_dispatch_reason = "missing_projection_bias"
+                    return _original_forward(hidden_states, *args, **kwargs)
+                stream_ptr = int(torch_module.cuda.current_stream(hidden_states.device).cuda_stream) if torch_module is not None else None
+                if stream_ptr is None:
+                    import torch as runtime_torch
+
+                    stream_ptr = int(runtime_torch.cuda.current_stream(hidden_states.device).cuda_stream)
+                bridge.dispatch_qwen2_fused_rmsnorm_qkv_nf4(
+                    input_tensor,
+                    norm_weight,
+                    q_weight,
+                    q_state.absmax,
+                    q_bias,
+                    k_weight,
+                    k_state.absmax,
+                    k_bias,
+                    v_weight,
+                    v_state.absmax,
+                    v_bias,
+                    state["query"],
+                    state["key"],
+                    state["value"],
+                    epsilon=float(getattr(norm, "variance_epsilon", 1.0e-6)),
+                    stream_ptr=stream_ptr,
+                    tactic_name=tactic_name,
+                )
+                bridge.last_qwen2_fused_qkv_dispatch_reason = "native"
+                _attention._kudacuda_prefused_qkv = (
+                    state["query"],
+                    state["key"],
+                    state["value"],
+                )
+                residual = hidden_states
+                attention_outputs = _attention(hidden_states, *args, **kwargs)
+                attention_output = attention_outputs[0] if isinstance(attention_outputs, tuple) else attention_outputs
+                hidden_states = residual + attention_output
+                residual = hidden_states
+                hidden_states = _layer.post_attention_layernorm(hidden_states)
+                hidden_states = _layer.mlp(hidden_states)
+                return residual + hidden_states
+            except Exception as error:
+                setattr(bridge, "last_qwen2_fused_qkv_dispatch_reason", f"fallback:{type(error).__name__}:{error}")
+                return _original_forward(hidden_states, *args, **kwargs)
+            finally:
+                if prefused_marker is marker:
+                    try:
+                        delattr(_attention, "_kudacuda_prefused_qkv")
+                    except AttributeError:
+                        pass
+                else:
+                    _attention._kudacuda_prefused_qkv = prefused_marker
+
+        layer.forward = MethodType(fused_forward, layer)
+
+    restored = False
+
+    def unpatch() -> None:
+        nonlocal restored
+        if restored:
+            return
+        for layer, original_forward, previous_state, previous_prefused in originals:
+            layer.forward = original_forward
+            attention = layer.self_attn
+            if previous_state is marker:
+                try:
+                    delattr(attention, "_kudacuda_fused_qkv_state")
+                except AttributeError:
+                    pass
+            else:
+                attention._kudacuda_fused_qkv_state = previous_state
+            if previous_prefused is marker:
+                try:
+                    delattr(attention, "_kudacuda_prefused_qkv")
+                except AttributeError:
+                    pass
+            else:
+                attention._kudacuda_prefused_qkv = previous_prefused
+        attention_unpatch()
+        restored = True
 
     return unpatch

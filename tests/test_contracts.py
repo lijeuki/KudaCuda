@@ -13,6 +13,7 @@ from kudacuda_sidecar import (  # noqa: E402
     TensorContract,
     load_manifest,
     patch_qwen2_attention,
+    patch_qwen2_fused_qkv,
     patch_llama_attention,
     _qwen2_attention_dimensions,
     select_library_name,
@@ -41,10 +42,26 @@ class FakeNative:
         self.kudacuda_can_dispatch = FakeNativeFunction(lambda handle, tactic, batch, seq: 1)
         self.kudacuda_vector_add = FakeNativeFunction(self._vector_add)
         self.kudacuda_rmsnorm = FakeNativeFunction(self._rmsnorm)
+        self.kudacuda_fused_rmsnorm_qkv = FakeNativeFunction(self._fused_rmsnorm_qkv)
+        self.kudacuda_qwen2_fused_rmsnorm_qkv_nf4 = FakeNativeFunction(
+            self._qwen2_fused_rmsnorm_qkv_nf4
+        )
         self.kudacuda_qwen2_gqa_decode = FakeNativeFunction(self._qwen2_gqa_decode)
+        self.kudacuda_qwen2_gqa_decode_group_tiled = FakeNativeFunction(
+            self._qwen2_gqa_decode_group_tiled
+        )
+        self.kudacuda_qwen2_gqa_decode_graph = FakeNativeFunction(
+            self._qwen2_gqa_decode_graph
+        )
+        self.kudacuda_qwen2_gqa_decode_workspace_v3 = FakeNativeFunction(
+            self._qwen2_gqa_decode_workspace
+        )
         self.kudacuda_begin_capture = FakeNativeFunction(lambda handle, stream: 0)
         self.kudacuda_end_capture = FakeNativeFunction(lambda handle, stream: 0)
         self.kudacuda_replay_graph = FakeNativeFunction(lambda handle, stream: 0)
+        self.kudacuda_reset_graph = FakeNativeFunction(
+            lambda handle: self.calls.append(("reset_graph", handle)) or 0
+        )
         self.kudacuda_last_error = FakeNativeFunction(lambda handle: b"fake native error")
         self.kudacuda_destroy = FakeNativeFunction(lambda handle: self.calls.append(("destroy", handle)))
 
@@ -55,6 +72,40 @@ class FakeNative:
     def _rmsnorm(self, handle, input_ptr, weight_ptr, output_ptr, rows, hidden, epsilon, stream):
         self.calls.append(("rmsnorm", handle, input_ptr, weight_ptr, output_ptr, rows, hidden, epsilon, stream))
         return self.rmsnorm_status
+
+    def _fused_rmsnorm_qkv(
+        self,
+        handle,
+        input_ptr,
+        norm_weight_ptr,
+        qkv_weight_ptr,
+        bias_ptr,
+        output_ptr,
+        rows,
+        hidden,
+        epsilon,
+        stream,
+    ):
+        self.calls.append(
+            (
+                "fused_rmsnorm_qkv",
+                handle,
+                input_ptr,
+                norm_weight_ptr,
+                qkv_weight_ptr,
+                bias_ptr,
+                output_ptr,
+                rows,
+                hidden,
+                epsilon,
+                stream,
+            )
+        )
+        return 0
+
+    def _qwen2_fused_rmsnorm_qkv_nf4(self, *args):
+        self.calls.append(("qwen2_fused_rmsnorm_qkv_nf4", *args))
+        return 0
 
     def _qwen2_gqa_decode(
         self,
@@ -92,14 +143,36 @@ class FakeNative:
         )
         return self.qwen_status
 
+    def _qwen2_gqa_decode_group_tiled(self, *args):
+        self.calls.append(("qwen2_gqa_decode_group_tiled", *args[1:]))
+        return self.qwen_status
+
+    def _qwen2_gqa_decode_graph(self, *args):
+        self.calls.append(("qwen2_gqa_decode_graph", *args[1:]))
+        return self.qwen_status
+
+    def _qwen2_gqa_decode_workspace(self, *args):
+        self.calls.append(("qwen2_gqa_decode_workspace_v3", *args[1:]))
+        return self.qwen_status
+
 
 class FakeTensor:
-    def __init__(self, *, device="cuda", dtype="float32", shape=(4,), contiguous=True, pointer=100):
+    def __init__(
+        self,
+        *,
+        device="cuda",
+        dtype="float32",
+        shape=(4,),
+        contiguous=True,
+        pointer=100,
+        quant_state=None,
+    ):
         self.device = device
         self.dtype = dtype
         self.shape = shape
         self._contiguous = contiguous
         self._pointer = pointer
+        self.quant_state = quant_state
 
     @property
     def is_cuda(self):
@@ -120,6 +193,56 @@ class FakeTensor:
     def data_ptr(self):
         return self._pointer
 
+
+class FakeQuantState:
+    def __init__(self, *, shape, blocksize=64, quant_type="nf4", nested=False):
+        self.shape = shape
+        self.blocksize = blocksize
+        self.quant_type = quant_type
+        self.nested = nested
+
+
+def nf4_manifest():
+    manifest = qwen_manifest()
+    tactic = "qwen2_fused_rmsnorm_qkv_sm86_nf4_v1"
+    manifest["implemented_tactics"].append(tactic)
+    return manifest
+
+
+def nf4_tensors(*, blocksize=64, nested=False):
+    q_state = FakeQuantState(shape=(2048, 2048), blocksize=blocksize, nested=nested)
+    kv_state = FakeQuantState(shape=(256, 2048), blocksize=blocksize, nested=nested)
+    return (
+        FakeTensor(dtype="float16", shape=(1, 2048), pointer=11),
+        FakeTensor(dtype="float16", shape=(2048,), pointer=22),
+        FakeTensor(
+            dtype="uint8",
+            shape=(2097152, 1),
+            pointer=31,
+            quant_state=q_state,
+        ),
+        FakeTensor(dtype="float32", shape=(65536,), pointer=32),
+        FakeTensor(dtype="float16", shape=(2048,), pointer=33),
+        FakeTensor(
+            dtype="uint8",
+            shape=(262144, 1),
+            pointer=41,
+            quant_state=kv_state,
+        ),
+        FakeTensor(dtype="float32", shape=(8192,), pointer=42),
+        FakeTensor(dtype="float16", shape=(256,), pointer=43),
+        FakeTensor(
+            dtype="uint8",
+            shape=(262144, 1),
+            pointer=51,
+            quant_state=kv_state,
+        ),
+        FakeTensor(dtype="float32", shape=(8192,), pointer=52),
+        FakeTensor(dtype="float16", shape=(256,), pointer=53),
+        FakeTensor(dtype="float16", shape=(1, 2048), pointer=61),
+        FakeTensor(dtype="float16", shape=(1, 256), pointer=62),
+        FakeTensor(dtype="float16", shape=(1, 256), pointer=63),
+    )
 
 def make_bridge(native=None, manifest=None):
     return KudaCudaBridge(
@@ -235,6 +358,146 @@ class ContractTests(unittest.TestCase):
 
         with self.assertRaisesRegex(NativeCudaError, "fake native error"):
             bridge.dispatch_qwen2_gqa_decode(*tensors, kv_len=128, stream_ptr=77)
+
+    def test_qwen2_group_tiled_bridge_selects_versioned_native_symbol(self):
+        manifest = qwen_manifest()
+        group_tactic = "qwen2_gqa_decode_sm86_fp16_group_tiled_v2"
+        manifest["implemented_tactics"].append(group_tactic)
+        manifest["contracts"][group_tactic] = dict(
+            manifest["contracts"]["qwen2_gqa_decode_sm86_fp16"]
+        )
+        native = FakeNative()
+        bridge = make_bridge(native=native, manifest=manifest)
+        tensors = [
+            FakeTensor(dtype="float16", shape=(1, 16, 1, 128), pointer=11),
+            FakeTensor(dtype="float16", shape=(1, 2, 128, 128), pointer=22),
+            FakeTensor(dtype="float16", shape=(1, 2, 128, 128), pointer=33),
+            FakeTensor(dtype="float16", shape=(1, 16, 1, 128), pointer=44),
+        ]
+
+        bridge.dispatch_qwen2_gqa_decode(
+            *tensors,
+            kv_len=128,
+            stream_ptr=77,
+            tactic_name=group_tactic,
+        )
+
+        self.assertEqual(native.calls[-1][0], "qwen2_gqa_decode_group_tiled")
+
+    def test_qwen2_graph_bridge_passes_capacity_and_length_pointer(self):
+        manifest = qwen_manifest()
+        graph_tactic = "qwen2_gqa_decode_sm86_fp16_graph_v1"
+        manifest["implemented_tactics"].append(graph_tactic)
+        manifest["contracts"][graph_tactic] = dict(
+            manifest["contracts"]["qwen2_gqa_decode_sm86_fp16"]
+        )
+        native = FakeNative()
+        bridge = make_bridge(native=native, manifest=manifest)
+        tensors = [
+            FakeTensor(dtype="float16", shape=(1, 16, 1, 128), pointer=11),
+            FakeTensor(dtype="float16", shape=(1, 2, 128, 128), pointer=22),
+            FakeTensor(dtype="float16", shape=(1, 2, 128, 128), pointer=33),
+            FakeTensor(dtype="float16", shape=(1, 16, 1, 128), pointer=44),
+        ]
+        bridge.dispatch_qwen2_gqa_decode_graph(
+            *tensors,
+            kv_capacity=128,
+            kv_len_device=FakeTensor(dtype="int32", shape=(1,), pointer=55),
+            stream_ptr=77,
+            tactic_name=graph_tactic,
+        )
+
+        self.assertEqual(native.calls[-1][0], "qwen2_gqa_decode_graph")
+        self.assertEqual(native.calls[-1][-2:], (55, 77))
+
+    def test_qwen2_workspace_bridge_passes_fixed_workspace_and_length_pointer(self):
+        manifest = qwen_manifest()
+        tactic = "qwen2_gqa_decode_sm86_fp16_workspace_v3"
+        manifest["experimental_tactics"] = []
+        manifest["experimental_tactics"].append(tactic)
+        manifest["contracts"][tactic] = dict(
+            manifest["contracts"]["qwen2_gqa_decode_sm86_fp16"]
+        )
+        native = FakeNative()
+        bridge = make_bridge(native=native, manifest=manifest)
+        tensors = [
+            FakeTensor(dtype="float16", shape=(1, 16, 1, 128), pointer=11),
+            FakeTensor(dtype="float16", shape=(1, 2, 512, 128), pointer=22),
+            FakeTensor(dtype="float16", shape=(1, 2, 512, 128), pointer=33),
+            FakeTensor(dtype="float16", shape=(1, 16, 1, 128), pointer=44),
+        ]
+        bridge.configure_qwen2_graph_dispatch(
+            kv_len_device=FakeTensor(dtype="int32", shape=(1,), pointer=55),
+            kv_capacity=512,
+            workspace=FakeTensor(dtype="float32", shape=(16 * 8 * 130,), pointer=66),
+        )
+        bridge.dispatch_qwen2_gqa_decode_workspace(
+            *tensors,
+            kv_capacity=512,
+            kv_len_device=FakeTensor(dtype="int32", shape=(1,), pointer=55),
+            workspace=FakeTensor(dtype="float32", shape=(16 * 8 * 130,), pointer=66),
+            stream_ptr=77,
+            tactic_name=tactic,
+        )
+
+        self.assertEqual(native.calls[-1][0], "qwen2_gqa_decode_workspace_v3")
+        self.assertEqual(native.calls[-1][5:7], (66, 55))
+        self.assertEqual(native.calls[-1][-1], 77)
+
+    def test_fused_rmsnorm_qkv_bridge_validates_shapes_and_stream(self):
+        native = FakeNative()
+        bridge = make_bridge(native=native)
+        bridge.fused_rmsnorm_qkv(
+            FakeTensor(dtype="float16", shape=(2, 4), pointer=11),
+            FakeTensor(dtype="float16", shape=(4,), pointer=22),
+            FakeTensor(dtype="float16", shape=(12, 4), pointer=33),
+            FakeTensor(dtype="float16", shape=(12,), pointer=44),
+            FakeTensor(dtype="float16", shape=(2, 12), pointer=55),
+            epsilon=1.0e-5,
+            stream_ptr=77,
+        )
+
+        self.assertEqual(native.calls[-1][0], "fused_rmsnorm_qkv")
+        self.assertEqual(native.calls[-1][1:9], (101, 11, 22, 33, 44, 55, 2, 4))
+
+    def test_qwen2_nf4_bridge_passes_packed_weights_scales_and_dimensions(self):
+        native = FakeNative()
+        bridge = make_bridge(native=native, manifest=nf4_manifest())
+        bridge.dispatch_qwen2_fused_rmsnorm_qkv_nf4(
+            *nf4_tensors(),
+            epsilon=1.0e-5,
+            stream_ptr=77,
+        )
+
+        call = native.calls[-1]
+        self.assertEqual(call[0], "qwen2_fused_rmsnorm_qkv_nf4")
+        self.assertEqual(call[1:16], (101, 11, 22, 31, 32, 33, 41, 42, 43, 51, 52, 53, 61, 62, 63))
+        self.assertEqual(call[16:20], (1, 2048, 2048, 256))
+        self.assertEqual(call[20], 64)
+        self.assertAlmostEqual(call[21], 1.0e-5)
+        self.assertEqual(call[22], 77)
+
+    def test_qwen2_nf4_bridge_rejects_nested_quant_state_and_wrong_blocksize(self):
+        bridge = make_bridge(native=FakeNative(), manifest=nf4_manifest())
+        with self.assertRaisesRegex(ValueError, "nested"):
+            bridge.dispatch_qwen2_fused_rmsnorm_qkv_nf4(
+                *nf4_tensors(nested=True),
+                epsilon=1.0e-5,
+                stream_ptr=77,
+            )
+        with self.assertRaisesRegex(ValueError, "blocksize"):
+            bridge.dispatch_qwen2_fused_rmsnorm_qkv_nf4(
+                *nf4_tensors(blocksize=128),
+                epsilon=1.0e-5,
+                stream_ptr=77,
+            )
+
+    def test_bridge_resets_native_graph_lifecycle(self):
+        native = FakeNative()
+        bridge = make_bridge(native=native)
+        bridge.reset_graph()
+        self.assertEqual(native.calls[-1], ("reset_graph", 101))
+
     def test_tensor_contract_requires_exact_batch_and_sequence_when_declared(self):
         contract = TensorContract.from_mapping(
             {
@@ -343,6 +606,43 @@ class FakeAttention:
         return ("fallback", hidden_states, args, kwargs)
 
 
+class FakeProjection:
+    def __init__(self, weight):
+        self.weight = weight
+
+
+class FakeNorm:
+    def __init__(self):
+        self.weight = FakeTensor(dtype="float16", shape=(2048,), pointer=72)
+        self.variance_epsilon = 1.0e-6
+
+
+class FakeDecoderAttention(FakeAttention):
+    def __init__(self):
+        self.config = SimpleNamespace(num_attention_heads=16, num_key_value_heads=2)
+        self.head_dim = 128
+        self.q_proj = FakeProjection(FakeTensor(dtype="uint8", shape=(2097152, 1), pointer=73, quant_state=FakeQuantState(shape=(2048, 2048))))
+        self.k_proj = FakeProjection(FakeTensor(dtype="uint8", shape=(262144, 1), pointer=74, quant_state=FakeQuantState(shape=(256, 2048))))
+        self.v_proj = FakeProjection(FakeTensor(dtype="uint8", shape=(262144, 1), pointer=75, quant_state=FakeQuantState(shape=(256, 2048))))
+
+
+class FakeDecoderLayer:
+    def __init__(self):
+        self.input_layernorm = FakeNorm()
+        self.self_attn = FakeDecoderAttention()
+        self.post_attention_layernorm = lambda value: value
+        self.mlp = lambda value: value
+
+    def forward(self, hidden_states, *args, **kwargs):
+        return ("layer-fallback", hidden_states, args, kwargs)
+
+
+class FakeDecoderModel:
+    def __init__(self):
+        self.model = SimpleNamespace(layers=[FakeDecoderLayer()])
+        self.config = SimpleNamespace(model_type="qwen2")
+
+
 class FakeAttentionBridge:
     def __init__(self, enabled):
         self.enabled = enabled
@@ -385,6 +685,19 @@ class AttentionPatchTests(unittest.TestCase):
         self.assertEqual(instance.forward(FakeTensor(shape=(1, 1, 2048)))[0], "fallback")
         unpatch()
         self.assertIs(FakeAttention.forward, original)
+
+    def test_qwen2_fused_qkv_patch_wraps_decoder_layer_and_is_reversible(self):
+        model = FakeDecoderModel()
+        original_layer_forward = model.model.layers[0].forward
+        original_attention_forward = FakeDecoderAttention.forward
+        bridge = FakeAttentionBridge(enabled=False)
+
+        unpatch = patch_qwen2_fused_qkv(model, bridge, prepare=False)
+
+        self.assertIsNot(model.model.layers[0].forward.__func__, original_layer_forward.__func__)
+        unpatch()
+        self.assertIs(model.model.layers[0].forward.__func__, original_layer_forward.__func__)
+        self.assertIs(FakeDecoderAttention.forward, original_attention_forward)
 
 
 if __name__ == "__main__":

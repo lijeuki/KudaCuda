@@ -14,16 +14,34 @@ endif()
 
 if("${CMAKE_CUDA_ARCHITECTURES}" MATCHES "89")
     set(KUDACUDA_RMSNORM_SOURCE kernels/sm89/rmsnorm_sm89.cu)
+    set(KUDACUDA_RMSNORM_QKV_SOURCE kernels/sm89/rmsnorm_qkv_sm89.cu)
+    set(KUDACUDA_NF4_QKV_SOURCE kernels/sm89/nf4_fused_rmsnorm_qkv_sm89.cu)
     set(KUDACUDA_QWEN_SOURCE kernels/sm89/qwen2_gqa_decode_sm89.cu)
+    set(KUDACUDA_QWEN_GRAPH_SOURCE kernels/sm89/qwen2_gqa_graph_sm89.cu)
+    set(KUDACUDA_QWEN_GROUP_SOURCE kernels/sm89/qwen2_gqa_group_tiled_sm89.cu)
+    set(KUDACUDA_QWEN_VECTORIZED_SOURCE kernels/sm89/qwen2_gqa_vectorized_sm89.cu)
+    set(KUDACUDA_QWEN_WORKSPACE_SOURCE kernels/sm89/qwen2_gqa_workspace_sm89.cu)
 else()
     set(KUDACUDA_RMSNORM_SOURCE kernels/sm86/rmsnorm_sm86.cu)
+    set(KUDACUDA_RMSNORM_QKV_SOURCE kernels/sm86/rmsnorm_qkv_sm86.cu)
+    set(KUDACUDA_NF4_QKV_SOURCE kernels/sm86/nf4_fused_rmsnorm_qkv_sm86.cu)
     set(KUDACUDA_QWEN_SOURCE kernels/sm86/qwen2_gqa_decode_sm86.cu)
+    set(KUDACUDA_QWEN_GRAPH_SOURCE kernels/sm86/qwen2_gqa_graph_sm86.cu)
+    set(KUDACUDA_QWEN_GROUP_SOURCE kernels/sm86/qwen2_gqa_group_tiled_sm86.cu)
+    set(KUDACUDA_QWEN_VECTORIZED_SOURCE kernels/sm86/qwen2_gqa_vectorized_sm86.cu)
+    set(KUDACUDA_QWEN_WORKSPACE_SOURCE kernels/sm86/qwen2_gqa_workspace_sm86.cu)
 endif()
 
 add_library(kudacuda SHARED
     kernels/vector_add.cu
     ${KUDACUDA_RMSNORM_SOURCE}
+    ${KUDACUDA_RMSNORM_QKV_SOURCE}
+    ${KUDACUDA_NF4_QKV_SOURCE}
     ${KUDACUDA_QWEN_SOURCE}
+    ${KUDACUDA_QWEN_GRAPH_SOURCE}
+    ${KUDACUDA_QWEN_GROUP_SOURCE}
+    ${KUDACUDA_QWEN_VECTORIZED_SOURCE}
+    ${KUDACUDA_QWEN_WORKSPACE_SOURCE}
     runtime/kudacuda_runtime.cu
     runtime/kudacuda_registry.cu
 )
@@ -110,5 +128,65 @@ target_include_directories(kudacuda_qwen2_gqa_smoke
 target_link_libraries(kudacuda_qwen2_gqa_smoke PRIVATE kudacuda)
 
 set_target_properties(kudacuda_qwen2_gqa_smoke PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+)
+
+add_executable(kudacuda_rmsnorm_qkv_smoke
+    tests/rmsnorm_qkv_smoke.cu
+)
+
+target_include_directories(kudacuda_rmsnorm_qkv_smoke
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(kudacuda_rmsnorm_qkv_smoke PRIVATE kudacuda)
+
+set_target_properties(kudacuda_rmsnorm_qkv_smoke PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+)
+
+add_executable(kudacuda_nf4_fused_qkv_smoke
+    tests/nf4_fused_qkv_smoke.cu
+)
+
+target_include_directories(kudacuda_nf4_fused_qkv_smoke
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(kudacuda_nf4_fused_qkv_smoke PRIVATE kudacuda)
+
+set_target_properties(kudacuda_nf4_fused_qkv_smoke PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+)
+
+add_executable(kudacuda_qwen2_gqa_workspace_smoke
+    tests/qwen2_gqa_workspace_smoke.cu
+)
+
+target_include_directories(kudacuda_qwen2_gqa_workspace_smoke
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(kudacuda_qwen2_gqa_workspace_smoke PRIVATE kudacuda)
+
+set_target_properties(kudacuda_qwen2_gqa_workspace_smoke PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+)
+
+add_executable(kudacuda_cuda_graph_smoke
+    tests/cuda_graph_smoke.cu
+)
+
+target_include_directories(kudacuda_cuda_graph_smoke
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(kudacuda_cuda_graph_smoke PRIVATE kudacuda)
+
+set_target_properties(kudacuda_cuda_graph_smoke PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
 )

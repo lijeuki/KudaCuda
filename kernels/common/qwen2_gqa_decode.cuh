@@ -11,6 +11,7 @@ constexpr int kQwen2GqaThreads = 128;
 constexpr int kQwen2GqaMaxKvLen = 512;
 constexpr int kQwen2GqaWarpCount = kQwen2GqaThreads / 32;
 
+template <bool kReadKvLenFromDevice>
 __global__ void qwen2_gqa_decode_kernel(
     const __half* query,
     const __half* key_cache,
@@ -18,15 +19,21 @@ __global__ void qwen2_gqa_decode_kernel(
     __half* output,
     int64_t batch_size,
     int64_t query_len,
-    int64_t kv_len,
+    int64_t kv_len_argument,
+    int64_t kv_stride,
     int64_t query_heads,
     int64_t kv_heads,
     int64_t head_dim,
-    float scale
+    float scale,
+    const int32_t* kv_len_device
 ) {
+    const int64_t kv_len = kReadKvLenFromDevice
+        ? static_cast<int64_t>(*kv_len_device)
+        : kv_len_argument;
     const int64_t head_index = static_cast<int64_t>(blockIdx.x);
     const int64_t total_heads = batch_size * query_heads;
-    if (head_index >= total_heads || query_len != 1 || head_dim != kQwen2GqaThreads) {
+    if (head_index >= total_heads || query_len != 1 || head_dim != kQwen2GqaThreads ||
+        kv_len < 1 || kv_len > kQwen2GqaMaxKvLen || kv_stride < kv_len) {
         return;
     }
 
@@ -39,8 +46,8 @@ __global__ void qwen2_gqa_decode_kernel(
     const int64_t kv_head = query_head / group_size;
 
     const __half* query_head_data = query + (batch * query_heads + query_head) * head_dim;
-    const __half* key_head_data = key_cache + (batch * kv_heads + kv_head) * kv_len * head_dim;
-    const __half* value_head_data = value_cache + (batch * kv_heads + kv_head) * kv_len * head_dim;
+    const __half* key_head_data = key_cache + (batch * kv_heads + kv_head) * kv_stride * head_dim;
+    const __half* value_head_data = value_cache + (batch * kv_heads + kv_head) * kv_stride * head_dim;
     __half* output_head_data = output + (batch * query_heads + query_head) * head_dim;
 
     __shared__ float scores[kQwen2GqaMaxKvLen];
@@ -131,7 +138,7 @@ inline cudaError_t launch_qwen2_gqa_decode(
     float scale,
     cudaStream_t stream
 ) {
-    qwen2_gqa_decode_kernel<<<
+    qwen2_gqa_decode_kernel<false><<<
         static_cast<unsigned int>(batch_size * query_heads),
         kQwen2GqaThreads,
         0,
@@ -144,10 +151,50 @@ inline cudaError_t launch_qwen2_gqa_decode(
         batch_size,
         query_len,
         kv_len,
+        kv_len,
         query_heads,
         kv_heads,
         head_dim,
-        scale
+        scale,
+        nullptr
+    );
+    return cudaGetLastError();
+}
+
+inline cudaError_t launch_qwen2_gqa_decode_graph(
+    const __half* query,
+    const __half* key_cache,
+    const __half* value_cache,
+    __half* output,
+    int64_t batch_size,
+    int64_t query_len,
+    int64_t kv_capacity,
+    int64_t query_heads,
+    int64_t kv_heads,
+    int64_t head_dim,
+    float scale,
+    const int32_t* kv_len_device,
+    cudaStream_t stream
+) {
+    qwen2_gqa_decode_kernel<true><<<
+        static_cast<unsigned int>(batch_size * query_heads),
+        kQwen2GqaThreads,
+        0,
+        stream
+    >>>(
+        query,
+        key_cache,
+        value_cache,
+        output,
+        batch_size,
+        query_len,
+        0,
+        kv_capacity,
+        query_heads,
+        kv_heads,
+        head_dim,
+        scale,
+        kv_len_device
     );
     return cudaGetLastError();
 }
