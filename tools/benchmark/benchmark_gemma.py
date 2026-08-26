@@ -29,6 +29,7 @@ from KudaCuda.python.kudacuda_sidecar import (
     patch_qwen2_fused_qkv,
     patch_qwen2_swiglu,
 )
+from KudaCuda.tools.benchmark.audit_runtime import audit_runtime, capture_gpu_state, warm_up_cuda
 from KudaCuda.python.kudacuda_graph_plan import GraphContractError
 from KudaCuda.python.kudacuda_static_decode import GraphStaticCache, StaticDecodeGraphRunner
 
@@ -44,6 +45,9 @@ def summarize_generation(
 
     total_ms = float(prefill_ms) + sum(float(value) for value in decode_ms)
     itl_ms = sum(decode_ms) / len(decode_ms) if decode_ms else None
+    steady_state_tokens_per_second = (
+        1000.0 / float(itl_ms) if itl_ms is not None and itl_ms > 0 else None
+    )
     tokens_per_second = (
         float(generated_tokens) / (total_ms / 1000.0)
         if generated_tokens > 0 and total_ms > 0
@@ -52,6 +56,7 @@ def summarize_generation(
     return {
         "ttft_ms": float(prefill_ms),
         "itl_ms": itl_ms,
+        "steady_state_tokens_per_second": steady_state_tokens_per_second,
         "total_ms": total_ms,
         "tokens_per_second": tokens_per_second,
         "generated_tokens": int(generated_tokens),
@@ -101,6 +106,12 @@ def _is_eos(token: Any, eos_token_id: int | list[int] | None) -> bool:
     return int(token) in {int(value) for value in values}
 
 
+def _should_check_eos(defer_stop_checks: bool) -> bool:
+    """Keep host EOS synchronization enabled unless explicitly deferred."""
+
+    return not bool(defer_stop_checks)
+
+
 def greedy_decode(
     *,
     torch: Any,
@@ -110,6 +121,7 @@ def greedy_decode(
     max_new_tokens: int,
     eos_token_id: int | list[int] | None,
     device: Any,
+    defer_stop_checks: bool = False,
 ) -> dict[str, Any]:
     """Decode greedily and measure prefill/decode CUDA-event durations."""
 
@@ -132,7 +144,7 @@ def greedy_decode(
     decode_ms: list[float] = []
 
     for _ in range(max(0, max_new_tokens - 1)):
-        if _is_eos(next_token[0, 0].item(), eos_token_id):
+        if _should_check_eos(defer_stop_checks) and _is_eos(next_token[0, 0].item(), eos_token_id):
             break
         next_mask = torch.ones(
             (current_mask.shape[0], 1),
@@ -176,6 +188,7 @@ def run_generation(
     tokenizer: Any,
     max_new_tokens: int,
     device: Any,
+    defer_stop_checks: bool = False,
 ) -> dict[str, Any]:
     """Warm up, measure, and return text plus memory/timing evidence."""
 
@@ -188,6 +201,7 @@ def run_generation(
             max_new_tokens=min(2, max_new_tokens),
             eos_token_id=tokenizer.eos_token_id,
             device=device,
+            defer_stop_checks=defer_stop_checks,
         )
         _synchronize(torch, device)
         if getattr(device, "type", str(device)) == "cuda":
@@ -200,6 +214,7 @@ def run_generation(
             max_new_tokens=max_new_tokens,
             eos_token_id=tokenizer.eos_token_id,
             device=device,
+            defer_stop_checks=defer_stop_checks,
         )
 
     peak_vram_mib = None
@@ -230,6 +245,7 @@ def run_graph_generation(
     tactic_name: str,
     kv_bucket: int,
     workspace_gqa: bool = False,
+    defer_stop_checks: bool = False,
 ) -> dict[str, Any]:
     """Capture and replay one fixed-shape model decode forward."""
 
@@ -310,7 +326,9 @@ def run_graph_generation(
             logical_kv_len = prompt_length + 1
 
             for _ in range(max(0, max_new_tokens - 2)):
-                if _is_eos(next_token[0, 0].item(), tokenizer.eos_token_id):
+                if _should_check_eos(defer_stop_checks) and _is_eos(
+                    next_token[0, 0].item(), tokenizer.eos_token_id
+                ):
                     break
                 position_ids = torch.tensor(
                     [[logical_kv_len]],
@@ -451,6 +469,8 @@ def _base_payload(args: argparse.Namespace) -> dict[str, Any]:
         "prompt": args.prompt,
         "max_new_tokens": args.max_new_tokens,
         "dtype": args.dtype,
+        "defer_stop_checks": bool(args.defer_stop_checks),
+        "warmup_seconds": float(args.warmup_seconds),
         "sidecar": {"status": "not-run"},
     }
 
@@ -468,6 +488,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-new-tokens", type=int, default=32)
     parser.add_argument("--dtype", choices=("float16", "bfloat16"), default="float16")
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--warmup-seconds",
+        type=float,
+        default=0.0,
+        help="Keep CUDA busy for this many seconds after model load before timing.",
+    )
     parser.add_argument("--load-in-4bit", action="store_true")
     parser.add_argument("--qwen-tactic", default=None)
     parser.add_argument(
@@ -496,6 +522,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Opt into the separate experimental BF16/NF4 SwiGLU contract.",
     )
     parser.add_argument("--graph-decode", action="store_true")
+    parser.add_argument(
+        "--defer-stop-checks",
+        action="store_true",
+        help="Opt into deferring per-token host EOS checks; output length semantics change if EOS appears.",
+    )
     parser.add_argument("--graph-kv-bucket", type=int, default=512)
     parser.add_argument(
         "--workspace-gqa",
@@ -559,8 +590,12 @@ def main(argv: list[str] | None = None) -> int:
             if device.type == "cuda"
             else None,
             "measurement": "CUDA events for prefill/decode kernels; synchronized wall time recorded separately",
+            "allocator_config": os.environ.get("PYTORCH_CUDA_ALLOC_CONF"),
+            "runtime_audit": audit_runtime(torch, model, args),
         }
     )
+    payload["warmup"] = warm_up_cuda(torch, device, args.warmup_seconds)
+    payload["gpu_state_after_warmup"] = capture_gpu_state()
 
     try:
         allocated_after_load = float(torch.cuda.memory_allocated(device) / (1024**2)) if device.type == "cuda" else None
@@ -575,6 +610,7 @@ def main(argv: list[str] | None = None) -> int:
                 tokenizer=tokenizer,
                 max_new_tokens=args.max_new_tokens,
                 device=device,
+                defer_stop_checks=args.defer_stop_checks,
             ),
         }
     except Exception as error:
@@ -631,6 +667,7 @@ def main(argv: list[str] | None = None) -> int:
                         tactic_name=tactic_name,
                         kv_bucket=args.graph_kv_bucket,
                         workspace_gqa=args.workspace_gqa,
+                        defer_stop_checks=args.defer_stop_checks,
                     )
                     graph_evidence = generation.pop("graph")
                 except Exception as error:
@@ -660,6 +697,7 @@ def main(argv: list[str] | None = None) -> int:
                         tokenizer=tokenizer,
                         max_new_tokens=args.max_new_tokens,
                         device=device,
+                        defer_stop_checks=args.defer_stop_checks,
                     )
             else:
                 generation = run_generation(
@@ -670,6 +708,7 @@ def main(argv: list[str] | None = None) -> int:
                     tokenizer=tokenizer,
                     max_new_tokens=args.max_new_tokens,
                     device=device,
+                    defer_stop_checks=args.defer_stop_checks,
                 )
             native_dispatches = int(getattr(bridge, "native_attention_dispatches", 0))
             native_fused_qkv_dispatches = int(getattr(bridge, "native_fused_qkv_dispatches", 0))

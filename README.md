@@ -153,6 +153,19 @@ The latest paired graph rerun on the same RTX 3050 reached `23.139 tok/s` versus
 
 Evidence: [latest graph rerun](results/qwen25-3b-sm86-graph-model-current.json).
 
+### 128-token Tier-1 qualification
+
+The short four-token graph number above is prefill-diluted. A seven-run, 128-token measurement on the same RTX 3050 reports steady-state decode as `1000 / median ITL`: the eager control reached `15.090 tok/s` and the static graph sidecar reached `51.825 tok/s`. The candidate p25 was `51.722 tok/s`, above the control p75 of `15.194 tok/s`, and all seven runs preserved exact token/text parity. This qualifies the graph sidecar against eager Transformers; it does not promote the experimental NF4 QKV/GEMV/SwiGLU kernels.
+
+| Mode | Median ITL | Median steady-state | Peak VRAM | Promotion evidence |
+|---|---:|---:|---:|---|
+| Eager control, 128 tokens | 66.269 ms | 15.090 tok/s | 2,113.4 MiB | control p75: 15.194 tok/s |
+| Static CUDA Graph sidecar, 128 tokens | 19.296 ms | 51.825 tok/s | 2,135.6 MiB | candidate p25: 51.722 tok/s; exact 7/7 |
+
+Runtime audit: bitsandbytes `0.50.1` registers both `gemm_4bit` and `gemv_4bit`, but its live no-grad CUDA `matmul_4bit` route selects `gemm_4bit`, so the mere presence of a GEMV operator is not proof that Qwen projections use it. The full hardware, allocator, bnb, KV-length, and seven-run evidence is in the [Tier-1 report](docs/benchmark-report-2026-08-25-tier1.md) and [aggregate result](results/qwen25-3b-sm86-nf4-128tok-graph-aggregate.json).
+
+Clock controls were also tested: persistence mode is unsupported on this laptop and `nvidia-smi -lgc` is permission-blocked. A 10-second CUDA warmup reached P0/1927 MHz immediately after warmup, but a subsequent deferred-stop experiment was clock-contaminated and is not promoted. `--defer-stop-checks` remains opt-in because skipping `.item()` EOS checks changes early-EOS length semantics.
+
 ### NF4 fused QKV and workspace-GQA results
 
 The fused path was tested against the real D-drive Qwen2.5-3B NF4 checkpoint. Projection-level outputs matched bitsandbytes dequantization plus FP32 matmul within FP16 rounding (`max_abs`: Q `0.0078125`, K `0.001953125`, V `0.00048828125`). The four-token graph run produced exact token/text parity and 36 native fused-QKV dispatches during capture, but the correctness-first kernel regressed throughput because it is not yet a tiled GEMV implementation. The latest paired fused run is:
@@ -222,7 +235,7 @@ Five four-token RTX 3050 graph runs passed exact token/text parity and executed 
 
 ### 300 tok/s execution plan
 
-The 300 tok/s target is a stretch target for this 4 GiB RTX 3050, not a result of the current QKV experiment. At present, v3 changes only the QKV projection and the verified whole-model ceiling is 21.209 tok/s. Reaching 300 tok/s would require a different serving envelope—likely fixed-shape, single-token decode with all large NF4 projections native, full graph capture, and/or aggregate throughput from batching. The remaining work is staged as follows:
+The 300 tok/s target is a stretch target for this 4 GiB RTX 3050, not a result of the current QKV experiment. The verified 128-token single-stream graph result is 51.825 steady-state tok/s; reaching 300 tok/s would require a different serving envelope—likely fixed-shape, single-token decode with all large NF4 projections native, full graph capture, and/or aggregate throughput from batching. The remaining work is staged as follows:
 
 1. Profile the 36-layer decode to rank time by operation and separate GPU math from graph, allocator, and clock variance. The current eager diagnostic measured a 109.857 ms median instrumented decode step: attention total 61.726 ms/step, MLP total 26.334 ms/step, input/post RMSNorm 8.263/8.418 ms/step, QKV projections 15.146 ms/step, and output projection 7.044 ms/step. These are diagnostic event sums, not a production throughput claim.
 2. Do not expand the scalar handwritten NF4 GEMV family to more projections until it matches the framework's quantized kernels; the SwiGLU result shows that correctness and zero spills are insufficient. The next native family should use a tensor-core-compatible packed layout or an offline dequantized weight format.

@@ -1,0 +1,100 @@
+{
+  "benchmark": {
+    "model": "Qwen2.5-3B-Instruct",
+    "quantization": "NF4",
+    "dtype": "float16",
+    "generated_tokens": 128,
+    "graph_kv_bucket": 512,
+    "repetitions": 7,
+    "device": "NVIDIA GeForce RTX 3050 Laptop GPU",
+    "vram_capacity_mib": 4095.5,
+    "allocator_config": "expandable_segments:True",
+    "allocator_note": "PyTorch reported expandable_segments is unsupported on this Windows build; the setting was recorded but not credited as a performance change."
+  },
+  "hardware_state": {
+    "driver": "610.88",
+    "cuda_umd": "13.3",
+    "pstate_observed": "P0",
+    "graphics_clock_observed": "1500 MHz",
+    "sm_clock_observed": "1500 MHz",
+    "memory_clock_observed": "6001 MHz",
+    "max_graphics_clock": "2100 MHz",
+    "max_sm_clock": "2100 MHz",
+    "clock_lock": "not applied; read-only P0/clock state was captured"
+  },
+  "control_eager": {
+    "itl_ms": [
+      67.0808422959696,
+      65.1741824713279,
+      65.7917819586326,
+      66.7568882318932,
+      66.2691454249104,
+      65.8353322246882,
+      68.1786417623205
+    ],
+    "steady_state_tokens_per_second": [
+      14.9073858611952,
+      15.3434989451526,
+      15.1994667149882,
+      14.979727582962,
+      15.0899788066997,
+      15.189412223016,
+      14.6673499816281
+    ],
+    "median_itl_ms": 66.2691454249104,
+    "median_steady_state_tokens_per_second": 15.0899788066997
+  },
+  "candidate_static_graph": {
+    "itl_ms": [
+      19.3334649039495,
+      19.2911367444509,
+      19.2564310350824,
+      19.2957086384821,
+      19.2770504471514,
+      19.3348372412773,
+      19.4155354161488
+    ],
+    "steady_state_tokens_per_second": [
+      51.723785931187,
+      51.8372770483651,
+      51.930702952076,
+      51.8249948076883,
+      51.8751560432718,
+      51.720114709067,
+      51.5051467068094
+    ],
+    "median_itl_ms": 19.2957086384821,
+    "median_steady_state_tokens_per_second": 51.8249948076883,
+    "peak_vram_mib": 2135.61669921875,
+    "native_attention_dispatches": 36,
+    "graph_replays": 127
+  },
+  "promotion_gate": {
+    "candidate_p25_steady_state_tokens_per_second": 51.721950320127,
+    "control_p75_steady_state_tokens_per_second": 15.1944394690021,
+    "promoted_against_eager_control": true,
+    "all_runs_exact_token_and_text_parity": true
+  },
+  "runtime_audit": {
+    "torch": "2.11.0+cu128",
+    "bitsandbytes": "0.50.1",
+    "transformers": "5.15.1",
+    "requested_compute_dtype": "float16",
+    "quantized_module_count": 252,
+    "quantized_module": "Linear4bit/NF4/blocksize64/non-nested",
+    "registered_bitsandbytes_ops": [
+      "gemm_4bit",
+      "gemv_4bit"
+    ],
+    "selected_cuda_no_grad_route": "gemm_4bit_cuda_no_grad"
+  },
+  "evidence_files": [
+    "results/qwen25-3b-sm86-nf4-128tok-graph-repeat-1.json",
+    "results/qwen25-3b-sm86-nf4-128tok-graph-repeat-2.json",
+    "results/qwen25-3b-sm86-nf4-128tok-graph-repeat-3.json",
+    "results/qwen25-3b-sm86-nf4-128tok-graph-repeat-4.json",
+    "results/qwen25-3b-sm86-nf4-128tok-graph-repeat-5.json",
+    "results/qwen25-3b-sm86-nf4-128tok-graph-repeat-6.json",
+    "results/qwen25-3b-sm86-nf4-128tok-graph-repeat-7.json"
+  ]
+}

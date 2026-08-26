@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from KudaCuda.harness.compare import compare_values, write_json_evidence
-from KudaCuda.tools.benchmark.benchmark_gemma import summarize_generation
+from KudaCuda.tools.benchmark.benchmark_gemma import _should_check_eos, summarize_generation
 from KudaCuda.tools.profiling.profile_command import build_profile_command
 
 
@@ -70,6 +70,10 @@ class ProfilingTests(unittest.TestCase):
 
 
 class GemmaBenchmarkTests(unittest.TestCase):
+    def test_deferred_stop_checks_are_opt_in(self):
+        self.assertTrue(_should_check_eos(False))
+        self.assertFalse(_should_check_eos(True))
+
     def test_generation_summary_does_not_invent_ttft_or_throughput(self):
         result = summarize_generation(
             prefill_ms=12.0,
@@ -80,6 +84,7 @@ class GemmaBenchmarkTests(unittest.TestCase):
 
         self.assertEqual(result["ttft_ms"], 12.0)
         self.assertEqual(result["itl_ms"], 5.0)
+        self.assertEqual(result["steady_state_tokens_per_second"], 200.0)
         self.assertAlmostEqual(result["total_ms"], 22.0)
         self.assertAlmostEqual(result["tokens_per_second"], 3 / 0.022)
         self.assertEqual(result["peak_vram_mib"], 2048.0)
@@ -93,6 +98,7 @@ class GemmaBenchmarkTests(unittest.TestCase):
         )
 
         self.assertIsNone(result["itl_ms"])
+        self.assertIsNone(result["steady_state_tokens_per_second"])
         self.assertIsNone(result["peak_vram_mib"])
 
 
