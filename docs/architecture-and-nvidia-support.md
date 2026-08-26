@@ -45,7 +45,7 @@ The exported ABI in `include/kudacuda.h` exposes:
 - raw-pointer vector-add, RMSNorm, Qwen2 GQA decode, and fused RMSNorm-QKV dispatch;
 - an opt-in Qwen2 NF4 fused RMSNorm-QKV ABI with packed weights, block scales, FP16 biases, and separate Q/K/V outputs;
 - an opt-in fixed-workspace Qwen2 GQA ABI with a device-resident logical KV-length scalar;
-- Qwen2 decode ABI dimensions: batch 1, query length 1, KV length 1..512, 16 query heads, 2 KV heads, head dimension 128, FP16;
+- Qwen2 direct decode ABI dimensions: batch 1, query length 1, KV length 1..2,048, 16 query heads, 2 KV heads, head dimension 128, FP16; graph and experimental entry points retain separate fixed-capacity contracts;
 - CUDA graph begin/end/replay operations.
 
 The Python bridge validates CUDA residency, contiguity, rank, dtype, and shape before passing `data_ptr()` values and the active stream pointer to native code.

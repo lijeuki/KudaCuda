@@ -39,7 +39,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Exact Qwen tactic name; defaults to the architecture baseline tactic.",
     )
     parser.add_argument("--seed", type=int, default=20260824)
-    parser.add_argument("--kv-lens", type=int, nargs="+", default=[1, 7, 128, 512])
+    parser.add_argument(
+        "--kv-lens",
+        type=int,
+        nargs="+",
+        default=[1, 7, 128, 512, 585, 1024, 2048],
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -66,9 +71,11 @@ def main(argv: list[str] | None = None) -> int:
         tactic_name = args.tactic or (
             f"qwen2_gqa_decode_{str(bridge.manifest['target_arch']).replace('sm_', 'sm')}_fp16"
         )
+        contract = bridge.qwen_contracts.get(tactic_name)
+        max_kv_len = int(getattr(contract, "kv_len_max", 512))
         for kv_len in args.kv_lens:
-            if kv_len < 1 or kv_len > 512:
-                raise ValueError(f"kv_len must be in 1..512, got {kv_len}")
+            if kv_len < 1 or kv_len > max_kv_len:
+                raise ValueError(f"kv_len must be in 1..{max_kv_len}, got {kv_len}")
             query = torch.randn((1, 16, 1, 128), device=device, dtype=torch.float16).contiguous()
             key_cache = torch.randn((1, 2, kv_len, 128), device=device, dtype=torch.float16).contiguous()
             value_cache = torch.randn((1, 2, kv_len, 128), device=device, dtype=torch.float16).contiguous()

@@ -1,9 +1,11 @@
+import json
 import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
 PYTHON_ROOT = Path(__file__).parents[1] / "python"
+PROJECT_ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(PYTHON_ROOT))
 
 from kudacuda_sidecar import (  # noqa: E402
@@ -410,6 +412,20 @@ class ContractTests(unittest.TestCase):
         self.assertFalse(contract.matches(2, 1, 128))
         self.assertFalse(contract.matches(1, 2, 128))
         self.assertFalse(contract.matches(1, 513, 128))
+
+    def test_rtx3050_direct_qwen_profile_accepts_long_context_but_graph_stays_bounded(self):
+        manifest = json.loads(
+            (PROJECT_ROOT / "manifests" / "rtx3050-sm86.json").read_text(encoding="utf-8")
+        )
+
+        direct = manifest["contracts"]["qwen2_gqa_decode_sm86_fp16"]
+        graph = manifest["contracts"]["qwen2_gqa_decode_sm86_fp16_graph_v1"]
+
+        self.assertEqual(direct["kv_len_max"], 2048)
+        self.assertTrue(
+            Qwen2GqaContract.from_mapping(direct).matches(1, 1, 585)
+        )
+        self.assertEqual(graph["kv_len_max"], 512)
 
     def test_qwen2_bridge_passes_pointers_dimensions_and_stream(self):
         native = FakeNative()

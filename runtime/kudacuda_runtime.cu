@@ -892,9 +892,9 @@ int kudacuda_qwen2_gqa_decode(
         handle->set_error("qwen2_gqa_decode requires non-null device pointers");
         return 1;
     }
-    if (batch_size != 1 || query_len != 1 || kv_len < 1 || kv_len > 512 ||
+    if (batch_size != 1 || query_len != 1 || kv_len < 1 || kv_len > 2048 ||
         query_heads != 16 || kv_heads != 2 || head_dim != 128) {
-        handle->set_error("qwen2_gqa_decode requires batch=1, query_len=1, kv_len=1..512, q_heads=16, kv_heads=2, head_dim=128");
+        handle->set_error("qwen2_gqa_decode requires batch=1, query_len=1, kv_len=1..2048, q_heads=16, kv_heads=2, head_dim=128");
         return 1;
     }
     if (!(scale > 0.0F)) {

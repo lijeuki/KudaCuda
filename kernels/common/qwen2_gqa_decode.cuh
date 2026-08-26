@@ -8,7 +8,10 @@
 namespace kudacuda {
 
 constexpr int kQwen2GqaThreads = 128;
-constexpr int kQwen2GqaMaxKvLen = 512;
+// The direct decode profile supports the long-context path used by the
+// interactive Transformers adapter. Graph and experimental kernels retain
+// their own 512-token guards in their entry points until separately tuned.
+constexpr int kQwen2GqaMaxKvLen = 2048;
 constexpr int kQwen2GqaWarpCount = kQwen2GqaThreads / 32;
 
 template <bool kReadKvLenFromDevice>

@@ -43,6 +43,19 @@ The graph result is the current verified local serving path. It describes this c
 
 The promotion evidence is recorded in [the aggregate result](results/qwen25-3b-sm86-nf4-128tok-graph-aggregate.json) and [the Tier-1 benchmark report](docs/benchmark-report-2026-08-25-tier1.md).
 
+### Direct decode long-context qualification
+
+The interactive Transformers path now has a separate direct-decode KV profile through 2,048 tokens. This removes the accidental 512-token cliff that previously sent a chat turn such as `kv_len=585` to framework attention. The fixed-shape graph and experimental GQA profiles remain capped at 512 until separately tuned.
+
+| Logical KV length | Native GPU time | PyTorch eager GPU time | Native speedup vs eager |
+|---:|---:|---:|---:|
+| 512 | 0.066 ms | 0.093 ms | 1.40x |
+| 585 | 0.075 ms | 0.104 ms | 1.38x |
+| 1,024 | 0.128 ms | 0.214 ms | 1.67x |
+| 2,048 | 0.447 ms | 0.119 ms | 0.27x |
+
+All seven direct-kernel cases (1, 7, 128, 512, 585, 1,024, and 2,048) passed the independent FP32 reference check. The 2,048-token result is correctness-qualified but not performance-promoted; use the direct profile through the tested 1,024-token range while the long-context tactic is optimized further. Evidence: [correctness](results/qwen2-gqa-sm86-long-context-build.json) and [microbenchmark](results/qwen2-gqa-sm86-long-context-build-benchmark.json).
+
 ## The KudaCuda platform
 
 ```text
@@ -133,8 +146,8 @@ A faster microbenchmark alone does not promote a tactic. The current gate uses a
 | GPU target | NVIDIA Ampere `sm_86`; Ada `sm_89` compilation track |
 | Validated device | RTX 3050 Laptop GPU, 4 GiB class |
 | Runtime platforms | Windows DLL and Linux shared-library paths |
-| Active native operation | Qwen2 decode-only FP16 grouped-query attention under the exact graph contract |
-| Graph mode | Fixed-shape Qwen2 decode graph with stable cache capacity and device-resident logical KV length |
+| Active native operation | Qwen2 decode-only FP16 grouped-query attention; direct profile supports KV length 1..2,048 |
+| Graph mode | Fixed-shape Qwen2 decode graph with stable cache capacity and device-resident logical KV length; current bucket remains 512 |
 | Other native pilots | Vector add, FP32 RMSNorm, RMSNorm-QKV reference, Qwen2 workspace/GQA variants |
 | Quantization focus | Qwen2.5-3B bitsandbytes NF4 integration; handwritten NF4 projection tactics remain experimental |
 | BF16 support | Separate experimental BF16/NF4 SwiGLU ABI and native smoke coverage |
@@ -142,7 +155,7 @@ A faster microbenchmark alone does not promote a tactic. The current gate uses a
 | Model coverage | Qwen2.5-3B decode path validated; Gemma harness and fallback plumbing available |
 | L40S status | `sm_89` artifacts compile; runtime and performance acceptance still require an L40S |
 
-Prefill, unsupported masks, dynamic contracts outside the configured graph bucket, unsupported model families, and unpromoted tactics remain on the framework path.
+Prefill, unsupported masks, dynamic contracts outside the configured graph bucket, unsupported model families, and unpromoted tactics remain on the framework path. The interactive chat tool prints a KV preflight warning before a request that would exceed its loaded direct profile and supports `/reset` to clear accumulated history.
 
 ## Repository layout
 
@@ -194,11 +207,17 @@ cd KudaCuda
 ./scripts/build.ps1 -Architecture 89
 ```
 
-Equivalent CMake commands:
+The script automatically loads the VS 2022 developer environment and uses
+Ninja because this CUDA 13.3 installation is not registered with CMake's
+Visual Studio CUDA toolset discovery. Equivalent commands from a developer
+shell are:
 
 ```powershell
-cmake -S . -B build-sm86 -DCMAKE_CUDA_ARCHITECTURES=86
-cmake --build build-sm86 --config Release
+cmake -S . -B build-sm86-ninja -G Ninja `
+  -DCMAKE_BUILD_TYPE=Release `
+  -DCMAKE_CUDA_COMPILER="$env:CUDA_PATH\bin\nvcc.exe" `
+  -DCMAKE_CUDA_ARCHITECTURES=86
+cmake --build build-sm86-ninja --parallel
 ```
 
 The verified prebuilt local artifact is [`artifacts/sm86/kudacuda.dll`](artifacts/sm86/kudacuda.dll). Use the `sm_89` artifact only after validating it on an actual L40S.

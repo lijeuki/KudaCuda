@@ -202,3 +202,18 @@ The approved NF4 fused RMSNorm-QKV, fixed-workspace GQA, and fused NF4 SwiGLU pl
 Five paired NF4 graph runs confirm the regression: median throughput was `5.126 tok/s` with the fused path versus `15.358 tok/s` for its paired baseline, a `66.6%` decrease. All five runs had exact token/text parity and 36 native fused-QKV dispatches. The NF4 fused path is therefore functionally active but fails the no-regression promotion gate; its median is also `77.8%` below the latest static graph result. The workspace GQA path is correct and improves its paired eager baseline by about 18.0%, but is about 20.7% below the existing static graph. Both remain opt-in experimental; the existing static graph remains the local default.
 
 The `sm_89` target compiled successfully with CUDA 13.3, MSVC, and Ninja. Runtime validation is explicitly pending on an L40S; the RTX 3050 cannot execute `sm_89` device code. The next performance step is a tiled NF4 GEMV with bias epilogue and a parallel workspace reduction, followed by repeated median runs before any promotion.
+
+## Direct GQA long-context contract — 2026-08-26
+
+The interactive chat failure at `kv_len=585` was traced to the direct Qwen2 GQA contract and kernel score-buffer guard at 512 tokens. The direct baseline now compiles with a 2,048-token score buffer and runtime guard; graph, group-tiled, vectorized, and workspace entry points remain at their existing 512-token contracts.
+
+The rebuilt RTX 3050 `sm_86` DLL passed the native FP32-reference check at KV lengths `1, 7, 128, 512, 585, 1024, and 2048`, with zero mismatches under the existing `3.5e-3` tolerance. Direct-kernel versus PyTorch eager GPU-event timings were:
+
+| KV length | Native | PyTorch eager | Native speedup vs eager |
+|---:|---:|---:|---:|
+| 512 | 0.066 ms | 0.093 ms | 1.40x |
+| 585 | 0.075 ms | 0.104 ms | 1.38x |
+| 1024 | 0.128 ms | 0.214 ms | 1.67x |
+| 2048 | 0.447 ms | 0.119 ms | 0.27x |
+
+This removes the accidental fallback cliff for the observed `585`-token chat context. The 2,048-token path is correctness-qualified but not performance-promoted; the current recommendation is to use the direct profile through the tested 1,024-token range while a long-context tactic is optimized further. The interactive chat tool reports a KV preflight budget and supports `/reset` to clear accumulated prompt history. Evidence: [long-context correctness](../results/qwen2-gqa-sm86-long-context-build.json) and [long-context benchmark](../results/qwen2-gqa-sm86-long-context-build-benchmark.json).
