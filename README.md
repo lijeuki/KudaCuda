@@ -43,6 +43,18 @@ The graph result is the current verified local serving path. It describes this c
 
 The promotion evidence is recorded in [the aggregate result](results/qwen25-3b-sm86-nf4-128tok-graph-aggregate.json) and [the Tier-1 benchmark report](docs/benchmark-report-2026-08-25-tier1.md).
 
+### Achievable interactive response on the RTX 3050
+
+A fresh side-by-side Transformers chat run used the same Qwen2.5-3B checkpoint, prompts, and `--max-new-tokens 128`. KudaCuda was confirmed active by `reason=native`, the implemented tactic, and nonzero native dispatch counts.
+
+| Chat turn | Generated | Without sidecar | KudaCuda sidecar | Sidecar improvement |
+|---|---:|---:|---:|---:|
+| Short greeting | 10 tokens | 5.19 tok/s, 1.926 s | 7.72 tok/s, 1.296 s | 48.8% tok/s |
+| 128-token sky explanation | 128 tokens | 11.62 tok/s, 11.019 s | 15.45 tok/s, 8.283 s | 33.0% tok/s |
+| Follow-up assistant answer | 128 tokens | Not measured | 15.35 tok/s, 8.340 s | — |
+
+Across the two paired turns, KudaCuda generated 138 tokens in 9.579 seconds versus 12.946 seconds without the sidecar: 14.41 versus 10.66 token/s, or approximately 35.2% higher measured response throughput. The 128-token turns reached 15.35–15.45 tok/s with native attention active. These are interactive measurements on this exact laptop, checkpoint, driver state, prompts, and terminal session; they are an achievable local response range, not a universal hardware guarantee. The one-time model weight-load display was approximately 3 seconds with the sidecar and 5 seconds without it, but startup loading was not controlled as a benchmark variable.
+
 ### Direct decode long-context qualification
 
 The interactive Transformers path now has a separate direct-decode KV profile through 2,048 tokens. This removes the accidental 512-token cliff that previously sent a chat turn such as `kv_len=585` to framework attention. The fixed-shape graph and experimental GQA profiles remain capped at 512 until separately tuned.
